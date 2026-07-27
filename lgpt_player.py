@@ -25,6 +25,7 @@ Teclas:
 from __future__ import annotations
 
 import argparse
+import queue
 import select
 import sys
 import termios
@@ -98,8 +99,42 @@ class MidoMidiOut(MidiOut):
             "program_change", channel=channel, program=program))
 
 
-def open_midi_input(port_name: str | None, engine_ref: dict):
-    """Abre el puerto MIDI de entrada y encola los CC al engine activo.
+def parse_button_spec(spec: str) -> tuple | None:
+    """'note:canal:nota' o 'cc:canal:control' -> tupla normalizada, o None."""
+    try:
+        kind, ch, num = spec.split(":")
+        ch, num = int(ch), int(num)
+    except (ValueError, AttributeError):
+        return None
+    if kind == "note":
+        return ("note_on", ch & 0x0F, num & 0x7F)
+    if kind == "cc":
+        return ("control_change", ch & 0x0F, num & 0x7F)
+    return None
+
+
+def match_button(mapping: dict, msg) -> str | None:
+    """Devuelve la acción del botón que coincide con el mensaje, o None.
+
+    mapping: acción -> spec de parse_button_spec()."""
+    if msg.type == "note_on" and msg.velocity == 0:
+        return None
+    for action, spec in mapping.items():
+        if spec is None:
+            continue
+        mtype, ch, num = spec
+        if msg.type != mtype or getattr(msg, "channel", None) != ch:
+            continue
+        if mtype == "note_on" and msg.note == num:
+            return action
+        if mtype == "control_change" and msg.control == num and msg.value > 0:
+            return action
+    return None
+
+
+def open_midi_input(port_name: str | None, engine_ref: dict,
+                    ui_queue: queue.SimpleQueue, buttons: dict):
+    """Abre el puerto MIDI de entrada: botones a la UI y CCs al engine.
 
     engine_ref es un dict mutable con la clave "engine": el callback MIDI
     siempre usa el engine actual, aunque se cambie de canción.
@@ -117,6 +152,11 @@ def open_midi_input(port_name: str | None, engine_ref: dict):
         return None
 
     def on_message(msg):
+        # Los botones mapeados tienen prioridad sobre el CC en directo
+        action = match_button(buttons, msg)
+        if action is not None:
+            ui_queue.put(action)
+            return
         engine = engine_ref.get("engine")
         if engine is None:
             return
@@ -186,6 +226,8 @@ class Keyboard:
 class Player:
     def __init__(self, args):
         self.args = args
+        self.buttons = args.buttons
+        self.ui_queue: queue.SimpleQueue = queue.SimpleQueue()
         self.projects = find_projects(Path(args.songs))
         if not self.projects:
             sys.exit(f"No se encuentran proyectos LGPT en {args.songs}")
@@ -252,11 +294,37 @@ class Player:
             sys.stdout.write("\r\x1b[K" + status)
             sys.stdout.flush()
 
+    def _poll_buttons(self, context: str) -> str | None:
+        """Traduce una acción de botón pendiente a la tecla equivalente.
+
+        Lista: up/down = moverse, accept/play = seleccionar.
+        Canción: play/accept = play/pausa, stop = volver a la lista,
+        up/down = anterior/siguiente.
+        """
+        try:
+            action = self.ui_queue.get_nowait()
+        except queue.Empty:
+            return None
+        if context == "list":
+            return {"up": "up", "down": "down",
+                    "accept": "\n", "play": "\n"}.get(action)
+        return {"up": "p", "down": "n",
+                "accept": " ", "play": " ", "stop": "q"}.get(action)
+
+    def _drain_buttons(self):
+        """Descarta pulsaciones acumuladas al cambiar de vista."""
+        while True:
+            try:
+                self.ui_queue.get_nowait()
+            except queue.Empty:
+                return
+
     def run_list(self) -> bool:
         """Menú de selección. Devuelve False para salir del programa."""
+        self._drain_buttons()
         self._draw_list()
         while True:
-            key = self.kb.read(0.2)
+            key = self.kb.read(0.2) or self._poll_buttons("list")
             if key is None:
                 continue
             if key in ("q", "esc"):
@@ -274,9 +342,10 @@ class Player:
         sys.stdout.write("\x1b[2J\x1b[H")
         engine = self._load_song(self.index)
         self._last_status = ""
+        self._drain_buttons()
         while True:
             self._draw_status(engine)
-            key = self.kb.read(0.1)
+            key = self.kb.read(0.1) or self._poll_buttons("song")
             if key is None:
                 continue
             if key == " ":
@@ -296,7 +365,8 @@ class Player:
 
     def run(self):
         self.midi_out = open_midi_output(self.args.midi_out)
-        self.midi_in = open_midi_input(self.args.midi, self.engine_ref)
+        self.midi_in = open_midi_input(
+            self.args.midi, self.engine_ref, self.ui_queue, self.buttons)
         self.stream.start()
         try:
             with Keyboard() as self.kb:
@@ -349,6 +419,10 @@ def main():
         args.midi_out if args.midi_out is not None
         else midi_cfg.get("output", "")
     )
+    args.buttons = {
+        action: parse_button_spec(spec)
+        for action, spec in cfg.get("buttons", {}).items()
+    }
 
     Player(args).run()
 

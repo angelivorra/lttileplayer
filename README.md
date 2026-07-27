@@ -12,13 +12,14 @@ pan law original) limitándose a lo que usan las canciones del proyecto.
 ## Archivos
 
 - `lttileplayer.toml` — configuración: carpeta de canciones, dispositivo
-  de salida de audio, puertos MIDI de entrada y salida.
+  de salida de audio, puertos MIDI de entrada y salida, botones.
+- `lgpt_setup.py` — asistente de configuración (terminal/SSH).
 - `lgpt_parser.py` — parser de `lgptsav.dat` (XML plano o comprimido LZ77).
 - `lgpt_engine.py` — motor de audio puro (numpy): voces, secuenciador,
   mixer. Sin dependencia de tarjeta de audio (testable headless).
 - `lgpt_player.py` — reproductor de consola: lista de canciones, salida de
   audio con `sounddevice`, entrada/salida MIDI con `mido`/`python-rtmidi`.
-- `tests/test_engine.py` — tests headless (unittest/pytest).
+- `tests/` — tests headless (unittest/pytest).
 
 ## Dependencias
 
@@ -31,7 +32,18 @@ python3 -m venv .venv
 
 ## Configuración
 
-`lttileplayer.toml` (raíz del repo):
+Asistente interactivo (terminal, funciona también por SSH):
+
+```sh
+.venv/bin/python lgpt_setup.py
+```
+
+Pregunta la salida de audio (lista numerada de dispositivos), la salida
+MIDI, la entrada MIDI y luego pide pulsar cada botón del controlador:
+**arriba, abajo, aceptar, play, stop** (captura note on o CC). En los
+menús, pulsar **enter** conserva el valor guardado en el sistema; en la
+captura de botones, enter deja el botón sin asignar. El resultado se
+guarda en `lttileplayer.toml`:
 
 ```toml
 songs_dir = "/home/angel/LGPT/songs"   # carpeta con proyectos lgpt_*
@@ -46,11 +58,18 @@ delay = 0.0          # retardo del audio en segundos (típico 0.5-1.0)
 input = ""           # entrada MIDI CC ("" = primera disponible, "off" = no)
 output = "virtual"   # salida MIDI de eventos LGPT ("virtual" = puerto ALSA
                      # nuevo 'lttileplayer'; nombre parcial; "" = desactivada)
+
+[buttons]            # "note:canal:nota" o "cc:canal:control"; "" = sin asignar
+up = "note:0:36"
+down = "note:0:37"
+accept = "note:0:38"
+play = "cc:0:41"
+stop = "cc:0:42"
 ```
 
 Los argumentos de línea de comandos (`--songs`, `--device`, `--midi`,
-`--midi-out`, `--samplerate`, `--blocksize`, `--config`) tienen prioridad
-sobre el archivo.
+`--midi-out`, `--samplerate`, `--blocksize`, `--delay`, `--config`)
+tienen prioridad sobre el archivo.
 
 ## Uso
 
@@ -58,11 +77,13 @@ sobre el archivo.
 .venv/bin/python lgpt_player.py
 ```
 
-Teclas:
+Teclas y botones MIDI asignados:
 
-- Lista: `↑`/`↓` o `j`/`k` para moverse, `enter` reproduce, `q` sale.
-- Reproducción: `espacio` play/pausa, `n` siguiente, `p` anterior,
-  `q` vuelve a la lista.
+- Lista: `↑`/`↓` (o botones **arriba**/**abajo**) para moverse,
+  `enter` (o **aceptar**/**play**) reproduce, `q` sale.
+- Reproducción: `espacio` (o **play**/**aceptar**) play/pausa,
+  `n`/`p` (o **abajo**/**arriba**) siguiente/anterior,
+  `q` (o **stop**) vuelve a la lista.
 
 MIDI CC de entrada (canal MIDI 1-8 → canal tracker 0-7):
 

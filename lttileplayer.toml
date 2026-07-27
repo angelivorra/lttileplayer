@@ -27,3 +27,13 @@ input = ""
 # "virtual" = crea un puerto ALSA nuevo llamado 'lttileplayer';
 # "" = desactivado.
 output = "virtual"
+
+[buttons]
+# Botones del controlador MIDI para manejar el reproductor:
+# "note:canal:nota" o "cc:canal:control"; "" = sin asignar.
+# Se capturan con `.venv/bin/python lgpt_setup.py`.
+up = ""
+down = ""
+accept = ""
+play = ""
+stop = ""
