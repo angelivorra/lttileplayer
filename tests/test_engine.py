@@ -16,6 +16,7 @@ from lgpt_engine import (
     Sample,
     TICKS_PER_STEP,
     SAMPLE_RATE,
+    parse_midi_instrument,
 )
 from lgpt_parser import LGPTProject
 
@@ -49,8 +50,29 @@ def make_project(tempo="120") -> LGPTProject:
     p.instrument_bank = {
         0: {"type": "Sample",
             "params": {"sample": "test.wav", "volume": "128", "pan": "127"}},
+        0x80: {"type": "Midi",
+               "params": {"channel": "3", "volume": "255", "note length": "0"}},
     }
     return p
+
+
+class MidiCollector:
+    """Sink MidiOut de prueba: registra todos los eventos."""
+
+    def __init__(self):
+        self.events = []
+
+    def note_on(self, channel, note, velocity):
+        self.events.append(("note_on", channel, note, velocity))
+
+    def note_off(self, channel, note):
+        self.events.append(("note_off", channel, note))
+
+    def cc(self, channel, control, value):
+        self.events.append(("cc", channel, control, value))
+
+    def program_change(self, channel, program):
+        self.events.append(("program_change", channel, program))
 
 
 def make_engine(tempo="120") -> Engine:
@@ -191,6 +213,116 @@ class TestVoices(unittest.TestCase):
         engine.push_event("cc", 0, 7, 0)   # volumen canal 0 a 0
         out = engine.render(512)
         self.assertEqual(float(np.abs(out).max()), 0.0)
+
+
+class TestMidiOut(unittest.TestCase):
+    def make_midi_engine(self):
+        engine = make_engine()
+        engine.midi_out = MidiCollector()
+        return engine
+
+    def test_note_on_off(self):
+        engine = self.make_midi_engine()
+        note_row(engine.project, 0, note=60, instr=0x80)
+        engine._process_tick()             # trigger: CC7 + note on
+        self.assertEqual(
+            engine.midi_out.events,
+            [("cc", 3, 7, 127), ("note_on", 3, 60, 127)])
+        note_row(engine.project, 1, note=62, instr=0x80)
+        for _ in range(TICKS_PER_STEP + 1):
+            engine._process_tick()
+        # Nueva nota: note off de la anterior antes del note on
+        events = engine.midi_out.events
+        off_idx = events.index(("note_off", 3, 60))
+        on_idx = events.index(("note_on", 3, 62, 127))
+        self.assertLess(off_idx, on_idx)
+
+    def test_mdcc(self):
+        engine = self.make_midi_engine()
+        note_row(engine.project, 0, note=60, instr=0x80)
+        engine.project.cmd1[1] = "MDCC"
+        engine.project.param1[1] = (74 << 8) | 100   # CC74 = 100
+        for _ in range(TICKS_PER_STEP + 1):
+            engine._process_tick()
+        self.assertIn(("cc", 3, 74, 100), engine.midi_out.events)
+
+    def test_mdpg(self):
+        engine = self.make_midi_engine()
+        note_row(engine.project, 0, note=60, instr=0x80)
+        engine.project.cmd1[1] = "MDPG"
+        engine.project.param1[1] = 42
+        for _ in range(TICKS_PER_STEP + 1):
+            engine._process_tick()
+        self.assertIn(("program_change", 3, 42), engine.midi_out.events)
+
+    def test_volm_midi_envia_cc7(self):
+        engine = self.make_midi_engine()
+        note_row(engine.project, 0, note=60, instr=0x80)
+        engine.project.cmd1[1] = "VOLM"
+        engine.project.param1[1] = 0x0080  # 128 // 2 = 64
+        for _ in range(TICKS_PER_STEP + 1):
+            engine._process_tick()
+        self.assertIn(("cc", 3, 7, 64), engine.midi_out.events)
+
+    def test_note_length(self):
+        engine = self.make_midi_engine()
+        engine.project.instrument_bank[0x80]["params"]["note length"] = "2"
+        engine.midi_instruments = {
+            0x80: parse_midi_instrument(
+                0x80, engine.project.instrument_bank[0x80]["params"])
+        }
+        note_row(engine.project, 0, note=60, instr=0x80)
+        engine._process_tick()             # trigger
+        self.assertNotIn(("note_off", 3, 60), engine.midi_out.events)
+        engine._process_tick()             # ticks 2 -> 1
+        engine._process_tick()             # ticks 1 -> 0: note off
+        self.assertIn(("note_off", 3, 60), engine.midi_out.events)
+
+    def test_panic_apaga_notas(self):
+        engine = self.make_midi_engine()
+        note_row(engine.project, 0, note=60, instr=0x80)
+        engine._process_tick()
+        engine.panic()
+        self.assertIn(("note_off", 3, 60), engine.midi_out.events)
+
+    def test_mdcc_ignorado_con_instrumento_sample(self):
+        # Como en el upstream: MDCC solo sale si el canal tiene un
+        # instrumento MIDI activo
+        engine = self.make_midi_engine()
+        note_row(engine.project, 0, note=60, instr=0)   # instrumento Sample
+        engine.project.cmd1[1] = "MDCC"
+        engine.project.param1[1] = (74 << 8) | 100
+        for _ in range(TICKS_PER_STEP + 1):
+            engine._process_tick()
+        self.assertEqual(engine.midi_out.events, [])
+
+
+class TestAudioDelay(unittest.TestCase):
+    def test_audio_delayed_but_midi_immediate(self):
+        engine = make_engine()
+        engine.set_audio_delay(2 * 512 / SAMPLE_RATE)  # 2 bloques
+        engine.midi_out = MidiCollector()
+        note_row(engine.project, 0, note=60, instr=0x80)
+        b1 = engine.render(512)
+        # El MIDI sale al momento; el audio todavía es silencio
+        self.assertTrue(engine.midi_out.events)
+        self.assertEqual(float(np.abs(b1).max()), 0.0)
+        b2 = engine.render(512)
+        self.assertEqual(float(np.abs(b2).max()), 0.0)
+
+    def test_delay_matches_offset(self):
+        delay_samples = 512
+        e1 = make_engine()
+        note_row(e1.project, 0)
+        e2 = make_engine()
+        note_row(e2.project, 0)
+        e2.set_audio_delay(delay_samples / SAMPLE_RATE)
+        plain = np.concatenate([e1.render(512) for _ in range(8)])
+        delayed = np.concatenate([e2.render(512) for _ in range(8)])
+        self.assertEqual(
+            float(np.abs(delayed[:delay_samples]).max()), 0.0)
+        np.testing.assert_allclose(
+            delayed[delay_samples:], plain[:-delay_samples], atol=1e-6)
 
 
 @unittest.skipUnless(SONGS_DIR.is_dir(), "canciones no disponibles")

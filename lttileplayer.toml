@@ -1,0 +1,29 @@
+# Configuración de lttileplayer.
+# Los argumentos de línea de comandos tienen prioridad sobre este archivo.
+
+# Carpeta con los proyectos lgpt_*
+songs_dir = "/home/angel/LGPT/songs"
+
+[audio]
+# Dispositivo de SALIDA de audio: nombre o índice PortAudio
+# (listarlos con `.venv/bin/python -m sounddevice`).
+# "" = dispositivo por defecto del sistema.
+output = ""
+samplerate = 44100
+blocksize = 512
+# Retardo de la salida de audio en segundos. Los eventos MIDI salen al
+# momento; el audio se retrasa este tiempo (p. ej. para sincronizar con
+# un programa que recibe el MIDI por red). Típico: 0.5 - 1.0.
+delay = 0.0
+
+[midi]
+# Puerto MIDI de ENTRADA (control CC en directo): nombre parcial del puerto.
+# "" = primero disponible; "off" = desactivado.
+input = ""
+
+# Puerto MIDI de SALIDA: por aquí salen todos los eventos MIDI de LGPT
+# (note on/off, CC7 de volumen, MDCC, MDPG) para que los recoja otro
+# programa o sintetizador. Nombre parcial del puerto;
+# "virtual" = crea un puerto ALSA nuevo llamado 'lttileplayer';
+# "" = desactivado.
+output = "virtual"

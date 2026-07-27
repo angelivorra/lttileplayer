@@ -11,6 +11,8 @@ Réplica en Python/numpy del comportamiento del reproductor original
     recorte por 'end', crush/downsample, filtro del upstream.
   - Comandos: VOLM, KILL, DLAY, LEGA, TABL, STOP, HOP.
   - Tablas (1 fila por tick, 3 columnas de comandos).
+  - Instrumentos MIDI (0x80-0x8F) y comandos MDCC/MDPG/MVEL: se emiten a
+    un sink MidiOut (puerto MIDI real en el reproductor).
   - Modificadores en directo por canal (para MIDI CC): volumen, pan,
     pitch y cutoff.
 
@@ -148,6 +150,51 @@ def parse_instrument(index: int, params: dict) -> InstrumentDef:
         attenuate=int_or("attenuate", 0xFF),
         table=int_or("table", -1),
     )
+
+
+@dataclass
+class MidiDef:
+    """Parámetros de un instrumento MIDI (0x80-0x8F) del banco."""
+
+    index: int
+    channel: int = 0            # canal MIDI 0-15
+    note_length: int = 0        # ticks; 0 = hasta note off
+    volume: int = 255
+    table: int = -1
+
+
+def parse_midi_instrument(index: int, params: dict) -> MidiDef:
+    def int_or(name: str, default: int) -> int:
+        try:
+            return int(params.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    return MidiDef(
+        index=index,
+        channel=int_or("channel", 0) & 0x0F,
+        note_length=int_or("note length", 0),
+        volume=int_or("volume", 255),
+        table=int_or("table", -1),
+    )
+
+
+class MidiOut:
+    """Sink de eventos MIDI del engine. El player lo conecta a un puerto
+    real; en tests se usa un colector. Todos los métodos reciben el canal
+    MIDI (0-15) del instrumento."""
+
+    def note_on(self, channel: int, note: int, velocity: int):
+        pass
+
+    def note_off(self, channel: int, note: int):
+        pass
+
+    def cc(self, channel: int, control: int, value: int):
+        pass
+
+    def program_change(self, channel: int, program: int):
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -480,6 +527,7 @@ class Channel:
         "playing", "time_to_start", "time_to_live", "voice",
         "last_instr", "last_note", "table",
         "cc_vol", "cc_pan", "cc_pitch", "cc_cutoff",
+        "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
     )
 
     def __init__(self, idx: int):
@@ -501,6 +549,12 @@ class Channel:
         self.cc_pan: Optional[int] = None
         self.cc_pitch = 1.0
         self.cc_cutoff = 1.0
+        # Estado del instrumento MIDI activo en el canal (si lo hay)
+        self.kind: Optional[str] = None        # None | "sample" | "midi"
+        self.midi_def: Optional[MidiDef] = None
+        self.midi_note: Optional[int] = None   # nota sonando (None = off)
+        self.midi_ticks = -1                   # cuenta atrás de note length
+        self.midi_vel: Optional[int] = None    # velocity (MVEL)
 
 
 # --------------------------------------------------------------------------
@@ -517,7 +571,8 @@ class Engine:
         engine.push_event("cc", 0, 7, 100)  # volumen canal 0
     """
 
-    def __init__(self, project, sample_rate: int = SAMPLE_RATE):
+    def __init__(self, project, sample_rate: int = SAMPLE_RATE,
+                 audio_delay: float = 0.0):
         if not isinstance(project, LGPTProject):
             project = LGPTProject(Path(project))
         if project.root is None:
@@ -537,6 +592,14 @@ class Engine:
             for iid, ins in project.instrument_bank.items()
             if ins["type"] == "Sample"
         }
+        self.midi_instruments = {
+            iid: parse_midi_instrument(iid, ins["params"])
+            for iid, ins in project.instrument_bank.items()
+            if ins["type"] == "Midi"
+        }
+        # Sink de eventos MIDI (instrumentos MIDI, MDCC/MDPG); lo asigna
+        # el reproductor. None = no se emite nada.
+        self.midi_out: Optional[MidiOut] = None
         self.channels = [Channel(i) for i in range(CHANNEL_COUNT)]
         self.tick_count = 0
         self.tick_phase = 0.0           # samples hasta el próximo tick
@@ -544,6 +607,19 @@ class Engine:
         self.finished = False           # True al recibir STOP
         self.events: queue.SimpleQueue = queue.SimpleQueue()
         self.unsupported_cmds: set[str] = set()
+        # Delay de audio (segundos): el secuenciador y los eventos MIDI van
+        # en tiempo real; solo la salida de audio se retrasa.
+        self._delay_buf: Optional[np.ndarray] = None
+        self._delay_pos = 0
+        self.set_audio_delay(audio_delay)
+
+    def set_audio_delay(self, seconds: float):
+        """Configura el retardo de la salida de audio (0 = sin delay)."""
+        n = int(seconds * self.sr)
+        self._delay_buf = (
+            np.zeros((n, 2), dtype=np.float32) if n > 0 else None
+        )
+        self._delay_pos = 0
 
     # -- transporte ---------------------------------------------------------
 
@@ -552,6 +628,11 @@ class Engine:
         for ch in self.channels:
             ch.playing = False
             ch.voice = None
+            self._midi_stop_note(ch)
+            ch.kind = None
+            ch.midi_def = None
+            ch.midi_ticks = -1
+            ch.midi_vel = None
             ch.table.stop()
             ch.time_to_start = 0
             ch.time_to_live = 0
@@ -567,6 +648,12 @@ class Engine:
         self.playing = True
         self.unsupported_cmds.clear()
 
+    def panic(self):
+        """Note off de todas las notas MIDI activas (al cambiar de canción
+        o salir)."""
+        for ch in self.channels:
+            self._midi_stop_note(ch)
+
     def push_event(self, *event):
         """Encola un evento externo (MIDI, teclado). Thread-safe."""
         self.events.put(event)
@@ -574,35 +661,61 @@ class Engine:
     # -- render --------------------------------------------------------------
 
     def render(self, frames: int) -> np.ndarray:
-        """Renderiza `frames` samples estéreo float32."""
+        """Renderiza `frames` samples estéreo float32.
+
+        El secuenciador y los eventos MIDI se procesan en tiempo real;
+        el audio devuelto sale retrasado `audio_delay` segundos si se
+        configuró (los primeros bloques son silencio).
+        """
         self._drain_events()
         out = np.zeros((frames, 2), dtype=np.float32)
-        if not self.playing:
+        if self.playing:
+            off = 0
+            while off < frames and self.playing:
+                n = min(frames - off, int(self.tick_phase))
+                if n > 0:
+                    for ch in self.channels:
+                        v = ch.voice
+                        if v is not None:
+                            if v.active:
+                                v.cc_vol = ch.cc_vol
+                                v.cc_pan = ch.cc_pan
+                                v.cc_pitch = ch.cc_pitch
+                                v.cc_cutoff = ch.cc_cutoff
+                                v.render(out, off, n)
+                            if not v.active:
+                                ch.voice = None
+                    off += n
+                    self.tick_phase -= n
+                if self.tick_phase < 1.0:
+                    frac = self.tick_phase    # resto fraccionario ya consumido
+                    self._process_tick()
+                    self.tick_phase = self.samples_per_tick + frac
+            out *= self.master
+            np.clip(out, -1.0, 1.0, out=out)
+        return self._apply_delay(out)
+
+    def _apply_delay(self, out: np.ndarray) -> np.ndarray:
+        """Línea de retardo circular sobre la salida (en pausa también
+        avanza, vaciando la cola de audio pendiente)."""
+        buf = self._delay_buf
+        if buf is None:
             return out
-        off = 0
-        while off < frames and self.playing:
-            n = min(frames - off, int(self.tick_phase))
-            if n > 0:
-                for ch in self.channels:
-                    v = ch.voice
-                    if v is not None:
-                        if v.active:
-                            v.cc_vol = ch.cc_vol
-                            v.cc_pan = ch.cc_pan
-                            v.cc_pitch = ch.cc_pitch
-                            v.cc_cutoff = ch.cc_cutoff
-                            v.render(out, off, n)
-                        if not v.active:
-                            ch.voice = None
-                off += n
-                self.tick_phase -= n
-            if self.tick_phase < 1.0:
-                frac = self.tick_phase    # resto fraccionario ya consumido
-                self._process_tick()
-                self.tick_phase = self.samples_per_tick + frac
-        out *= self.master
-        np.clip(out, -1.0, 1.0, out=out)
-        return out
+        frames = len(out)
+        d = len(buf)
+        pos = self._delay_pos
+        result = np.empty_like(out)
+        if frames <= d - pos:
+            result[:] = buf[pos:pos + frames]
+            buf[pos:pos + frames] = out
+        else:
+            k = d - pos
+            result[:k] = buf[pos:]
+            buf[pos:] = out[:k]
+            result[k:] = buf[:frames - k]
+            buf[:frames - k] = out[k:]
+        self._delay_pos = (pos + frames) % d
+        return result
 
     # -- eventos externos -----------------------------------------------------
 
@@ -627,6 +740,7 @@ class Engine:
                 self.finished = True
                 for ch in self.channels:
                     ch.voice = None
+                    self._midi_stop_note(ch)
 
     def _apply_cc(self, ci: int, cc: int, val: int):
         """Mapeo MIDI CC por canal: 1=cutoff, 7=volumen, 10=pan, 20=pitch."""
@@ -662,6 +776,12 @@ class Engine:
                 ch.time_to_live -= 1
                 if ch.time_to_live == 0:
                     ch.voice = None
+                    self._midi_stop_note(ch)
+        for ch in self.channels:
+            if ch.midi_ticks > 0:
+                ch.midi_ticks -= 1
+                if ch.midi_ticks == 0:
+                    self._midi_stop_note(ch)
         self.tick_count += 1
 
     def _advance_step(self, ch: Channel):
@@ -745,6 +865,31 @@ class Engine:
     def _stop_channel(self, ch: Channel):
         ch.playing = False
         ch.voice = None
+        self._midi_stop_note(ch)
+
+    # -- instrumentos MIDI ----------------------------------------------------
+
+    def _midi_start_note(self, ch: Channel, mdef: MidiDef, note: int):
+        """Arranca una nota MIDI (MidiInstrument::Start/Render del upstream):
+        primero CC7 con el volumen del instrumento, luego el note on."""
+        ch.midi_def = mdef
+        if self.midi_out is not None:
+            vol = int((mdef.volume + 0.99) / 2)
+            self.midi_out.cc(mdef.channel, 7, vol)
+            vel = ch.midi_vel if ch.midi_vel is not None else vol
+            self.midi_out.note_on(mdef.channel, note, vel)
+        ch.midi_note = note
+        ch.midi_ticks = mdef.note_length if mdef.note_length > 0 else -1
+
+    def _midi_stop_note(self, ch: Channel):
+        if (
+            ch.midi_note is not None
+            and ch.midi_def is not None
+            and self.midi_out is not None
+        ):
+            self.midi_out.note_off(ch.midi_def.channel, ch.midi_note)
+        ch.midi_note = None
+        ch.midi_ticks = -1
 
     def _get_hop(self, ch: Channel, pos: int) -> int:
         row = ch.phrase * 16 + pos
@@ -762,15 +907,18 @@ class Engine:
         instr = self.project.instruments[row]
         if note == 0xFF:
             return
-        ch.voice = None                       # monofonía: corta la voz anterior
         clean = instr != 0xFF
         if clean:
             ch.last_instr = instr
         if ch.last_instr is None:
             ch.last_instr = 0
         idef = self.instruments.get(ch.last_instr)
-        if idef is None:
-            return                            # instrumento MIDI o inexistente
+        mdef = (
+            self.midi_instruments.get(ch.last_instr)
+            if idef is None else None
+        )
+        if idef is None and mdef is None:
+            return                            # instrumento inexistente
         t = 0
         if ch.chain != 0xFF:
             tb = self.project.transposes[ch.chain * 16 + ch.chain_pos]
@@ -778,14 +926,24 @@ class Engine:
         final = (note + t + self.transpose) % 256
         if final >= 128:
             return
-        sample = self.bank.get(idef.sample_name)
-        if sample is None:
-            return
-        ch.voice = Voice(sample, idef, final, self.sr, self.samples_per_tick)
+        # Monofonía: corta la voz sample y/o la nota MIDI anteriores
+        ch.voice = None
+        self._midi_stop_note(ch)
+        if idef is not None:
+            sample = self.bank.get(idef.sample_name)
+            if sample is None:
+                return
+            ch.voice = Voice(sample, idef, final, self.sr,
+                             self.samples_per_tick)
+            ch.kind = "sample"
+        else:
+            self._midi_start_note(ch, mdef, final)
+            ch.kind = "midi"
         ch.last_note = final
         if clean:
-            if idef.table >= 0 and idef.table in self.project.tables:
-                ch.table.start(self.project.tables[idef.table])
+            table = idef.table if idef is not None else mdef.table
+            if table >= 0 and table in self.project.tables:
+                ch.table.start(self.project.tables[table])
             else:
                 ch.table.stop()
 
@@ -810,24 +968,36 @@ class Engine:
             self.finished = True
         elif cmd in ("HOP ", "DLAY"):
             pass                    # se procesan en el avance de step/trigger
-        elif cmd in ("VOLM", "LEGA"):
+        elif cmd in ("VOLM", "LEGA", "MDCC", "MDPG", "MVEL"):
             self._instrument_command(ch, cmd, param)
         else:
-            self.unsupported_cmds.add(cmd)    # MDCC, MDPG, ...: se ignoran
+            self.unsupported_cmds.add(cmd)
 
     def _instrument_command(self, ch: Channel, cmd: str, param: int):
-        v = ch.voice
-        if v is None:
-            return
-        if cmd == "VOLM":
-            v.set_volm(param)
-        elif cmd == "LEGA":
-            v.set_lega(param, ch.last_note)
+        if ch.kind == "sample" and ch.voice is not None:
+            if cmd == "VOLM":
+                ch.voice.set_volm(param)
+            elif cmd == "LEGA":
+                ch.voice.set_lega(param, ch.last_note)
+        elif ch.kind == "midi" and ch.midi_def is not None:
+            # MidiInstrument::ProcessCommand del upstream
+            mch = ch.midi_def.channel
+            if cmd == "VOLM" and self.midi_out is not None:
+                self.midi_out.cc(mch, 7, (param // 2) & 0x7F)
+            elif cmd == "MDCC" and self.midi_out is not None:
+                self.midi_out.cc(mch, (param >> 8) & 0x7F, param & 0x7F)
+            elif cmd == "MDPG" and self.midi_out is not None:
+                self.midi_out.program_change(mch, param & 0x7F)
+            elif cmd == "MVEL":
+                ch.midi_vel = (param // 2) & 0x7F
 
     # -- información para la UI -------------------------------------------------
 
     def active_channels(self) -> int:
-        return sum(1 for ch in self.channels if ch.voice is not None)
+        return sum(
+            1 for ch in self.channels
+            if ch.voice is not None or ch.midi_note is not None
+        )
 
     def song_positions(self) -> list[int]:
         return [ch.song_pos for ch in self.channels]

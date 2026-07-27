@@ -11,11 +11,13 @@ pan law original) limitándose a lo que usan las canciones del proyecto.
 
 ## Archivos
 
+- `lttileplayer.toml` — configuración: carpeta de canciones, dispositivo
+  de salida de audio, puertos MIDI de entrada y salida.
 - `lgpt_parser.py` — parser de `lgptsav.dat` (XML plano o comprimido LZ77).
 - `lgpt_engine.py` — motor de audio puro (numpy): voces, secuenciador,
   mixer. Sin dependencia de tarjeta de audio (testable headless).
 - `lgpt_player.py` — reproductor de consola: lista de canciones, salida de
-  audio con `sounddevice`, entrada MIDI con `mido`/`python-rtmidi`.
+  audio con `sounddevice`, entrada/salida MIDI con `mido`/`python-rtmidi`.
 - `tests/test_engine.py` — tests headless (unittest/pytest).
 
 ## Dependencias
@@ -27,15 +29,34 @@ python3 -m venv .venv
 .venv/bin/pip install numpy soundfile sounddevice mido python-rtmidi
 ```
 
+## Configuración
+
+`lttileplayer.toml` (raíz del repo):
+
+```toml
+songs_dir = "/home/angel/LGPT/songs"   # carpeta con proyectos lgpt_*
+
+[audio]
+output = ""          # salida de audio (nombre/índice PortAudio; "" = defecto)
+samplerate = 44100
+blocksize = 512
+delay = 0.0          # retardo del audio en segundos (típico 0.5-1.0)
+
+[midi]
+input = ""           # entrada MIDI CC ("" = primera disponible, "off" = no)
+output = "virtual"   # salida MIDI de eventos LGPT ("virtual" = puerto ALSA
+                     # nuevo 'lttileplayer'; nombre parcial; "" = desactivada)
+```
+
+Los argumentos de línea de comandos (`--songs`, `--device`, `--midi`,
+`--midi-out`, `--samplerate`, `--blocksize`, `--config`) tienen prioridad
+sobre el archivo.
+
 ## Uso
 
 ```sh
-.venv/bin/python lgpt_player.py --songs /ruta/a/lgpt/songs
+.venv/bin/python lgpt_player.py
 ```
-
-Opciones: `--device` (salida PortAudio/ALSA, p. ej. el HAT),
-`--midi` (nombre parcial del puerto de entrada), `--samplerate`,
-`--blocksize` (512 por defecto).
 
 Teclas:
 
@@ -43,7 +64,7 @@ Teclas:
 - Reproducción: `espacio` play/pausa, `n` siguiente, `p` anterior,
   `q` vuelve a la lista.
 
-MIDI CC (canal MIDI 1-8 → canal tracker 0-7):
+MIDI CC de entrada (canal MIDI 1-8 → canal tracker 0-7):
 
 | CC  | Parámetro                        |
 |-----|----------------------------------|
@@ -51,6 +72,20 @@ MIDI CC (canal MIDI 1-8 → canal tracker 0-7):
 | 7   | volumen                          |
 | 10  | pan                              |
 | 20  | pitch (±1 octava, centro en 64)  |
+
+Salida MIDI: todos los eventos MIDI que genera LGPT salen por el puerto
+configurado para que los recoja otro programa o sintetizador:
+
+- Note on/off de los instrumentos MIDI (0x80-0x8F), con su canal,
+  volumen (CC7 al disparar) y `note length`.
+- `MDCC` (CC arbitrario), `MDPG` (program change), `VOLM` (CC7) y
+  `MVEL` (velocity) cuando el canal tiene un instrumento MIDI activo.
+- Al cambiar de canción o salir se envía note off de las notas activas.
+
+Los eventos MIDI salen **en tiempo real**, al compás del secuenciador.
+Si se configura `[audio] delay` (o `--delay`), solo el audio se retrasa:
+útil cuando otro programa recibe el MIDI por red y suena con latencia —
+el audio local se retrasa lo mismo para mantenerse sincronizado.
 
 ## Tests y benchmark
 
@@ -72,14 +107,15 @@ Sartenazo v1):
 - Comandos: `VOLM` (rampas), `KILL`, `DLAY`, `LEGA`, `TABL`, `STOP`, `HOP`.
 - Tablas (1 fila/tick, 3 columnas, HOP con contador).
 - Crush/downsample y filtro LP del upstream (ver limitaciones).
-- Comandos MIDI-out (`MDCC`, `MDPG`) se ignoran por diseño.
+- Instrumentos MIDI: note on/off, `MDCC`, `MDPG`, `MVEL` y `VOLM` → CC7,
+  emitidos por el puerto MIDI de salida configurado.
 
 ## Limitaciones conocidas
 
 - **Filtro en modo `scream`**: el original desborda punto fijo int32 a
   propósito; aquí se satura a [-2, 2]. Aproximación pendiente de ajuste
   fino a oído (solo afecta al instrumento "accordion").
-- Sin grooves personalizados (ninguna canción los usa), sin instrumentos
-  MIDI, sin feedback, slices, oscillator ni ping-pong.
+- Sin grooves personalizados (ninguna canción los usa), sin feedback,
+  slices, oscillator ni ping-pong.
 - El comando `STOP` detiene la canción; no hay avance automático a la
   siguiente (se pulsa `n` o `espacio`).
