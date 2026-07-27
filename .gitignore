@@ -1,0 +1,23 @@
+# Entorno virtual Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Clon del repositorio upstream de LittleGPTracker
+LittleGPTracker/
+
+# Ficheros temporales de audio / salidas
+*.wav
+*.mp3
+*.ogg
+
+# Ficheros del sistema / editores
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Prompts temporales de trabajo
+PROMPT_*.md
