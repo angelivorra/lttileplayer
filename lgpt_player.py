@@ -39,7 +39,7 @@ import sounddevice as sd
 
 from lgpt_engine import Engine, MidiOut, SAMPLE_RATE
 
-DEFAULT_SONGS_DIR = "/home/angel/LGPT/songs"
+DEFAULT_SONGS_DIR = "/home/angel/Documentos/canciones/"
 CONFIG_PATH = Path(__file__).resolve().parent / "lttileplayer.toml"
 
 
@@ -413,7 +413,7 @@ def main():
     args.samplerate = args.samplerate or audio_cfg.get("samplerate", SAMPLE_RATE)
     args.blocksize = args.blocksize or audio_cfg.get("blocksize", 512)
     args.delay = args.delay if args.delay is not None else audio_cfg.get(
-        "delay", 0.0)
+        "delay", 1.0)
     args.midi = args.midi if args.midi is not None else midi_cfg.get("input", "")
     args.midi_out = (
         args.midi_out if args.midi_out is not None

@@ -1,39 +1,23 @@
-# Configuración de lttileplayer.
-# Los argumentos de línea de comandos tienen prioridad sobre este archivo.
+# Configuración de lttileplayer (generada por lgpt_setup.py).
+# Los argumentos de línea de comandos tienen prioridad.
 
-# Carpeta con los proyectos lgpt_*
-songs_dir = "/home/angel/LGPT/songs"
+songs_dir = "/home/angel/Documentos/canciones/"
 
 [audio]
-# Dispositivo de SALIDA de audio: nombre o índice PortAudio
-# (listarlos con `.venv/bin/python -m sounddevice`).
-# "" = dispositivo por defecto del sistema.
 output = ""
 samplerate = 44100
 blocksize = 512
-# Retardo de la salida de audio en segundos. Los eventos MIDI salen al
-# momento; el audio se retrasa este tiempo (p. ej. para sincronizar con
-# un programa que recibe el MIDI por red). Típico: 0.5 - 1.0.
-delay = 0.0
+delay = 1.0
 
 [midi]
-# Puerto MIDI de ENTRADA (control CC en directo): nombre parcial del puerto.
-# "" = primero disponible; "off" = desactivado.
-input = ""
-
-# Puerto MIDI de SALIDA: por aquí salen todos los eventos MIDI de LGPT
-# (note on/off, CC7 de volumen, MDCC, MDPG) para que los recoja otro
-# programa o sintetizador. Nombre parcial del puerto;
-# "virtual" = crea un puerto ALSA nuevo llamado 'lttileplayer';
-# "" = desactivado.
-output = "virtual"
+input = "Minilab3:Minilab3 MIDI 28:0"
+output = "Midi Through:Midi Through Port-0 14:0"
 
 [buttons]
-# Botones del controlador MIDI para manejar el reproductor:
-# "note:canal:nota" o "cc:canal:control"; "" = sin asignar.
-# Se capturan con `.venv/bin/python lgpt_setup.py`.
-up = ""
-down = ""
-accept = ""
-play = ""
-stop = ""
+# Botones del controlador: "note:canal:nota" o "cc:canal:control",
+# "" = sin asignar.
+up = "note:9:37"
+down = "note:9:36"
+accept = "note:9:38"
+play = "note:9:41"
+stop = "note:9:40"

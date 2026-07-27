@@ -19,6 +19,8 @@ import tomllib
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).resolve().parent / "lttileplayer.toml"
+DEFAULT_SONGS_DIR = "/home/angel/Documentos/canciones/"
+DEFAULT_DELAY = 1.0
 
 BUTTON_ACTIONS = [
     ("up", "ARRIBA (anterior en la lista)"),
@@ -36,6 +38,41 @@ def load_existing() -> dict:
     return {}
 
 
+def ask_songs_dir(current: str) -> str:
+    """Carpeta de canciones; enter conserva el valor actual."""
+    try:
+        raw = input(f"\nCarpeta de canciones (enter = {current}): ").strip()
+    except EOFError:
+        print()
+        return current
+    if not raw:
+        return current
+    path = Path(raw).expanduser()
+    if not path.is_dir():
+        print(f"  (aviso: {path} no existe todavía)")
+    return str(path)
+
+
+def ask_delay(current: float) -> float:
+    """Delay del audio en segundos; enter conserva el valor actual."""
+    while True:
+        try:
+            raw = input(f"\nDelay del audio en segundos "
+                        f"(enter = {current}): ").strip()
+        except EOFError:
+            print()
+            return current
+        if not raw:
+            return current
+        try:
+            value = float(raw)
+            if value >= 0:
+                return value
+        except ValueError:
+            pass
+        print("Valor no válido.")
+
+
 def choose(title: str, options: list[str], current_index: int = 0) -> int:
     """Menú numerado por líneas. Enter conserva la opción actual."""
     print(f"\n{title}")
@@ -43,8 +80,12 @@ def choose(title: str, options: list[str], current_index: int = 0) -> int:
         mark = "  <- actual" if i == current_index else ""
         print(f"  {i}) {opt}{mark}")
     while True:
-        raw = input(f"Elige 0-{len(options) - 1} "
-                    f"(enter = {options[current_index]}): ").strip()
+        try:
+            raw = input(f"Elige 0-{len(options) - 1} "
+                        f"(enter = {options[current_index]}): ").strip()
+        except EOFError:
+            print()
+            return current_index
         if not raw:
             return current_index
         try:
@@ -111,7 +152,8 @@ def pick_midi_input(names: list[str], current: str) -> str:
 def _drain_stdin():
     """Descarta todo el teclado pendiente (enters de menús anteriores)."""
     while select.select([sys.stdin], [], [], 0)[0]:
-        sys.stdin.readline()
+        if sys.stdin.readline() == "":
+            break                                # EOF
 
 
 def _drain_midi(port):
@@ -136,8 +178,10 @@ def capture_button(port, label: str, current: str) -> str:
     while True:
         r, _, _ = select.select([sys.stdin], [], [], 0.1)
         if r:
-            sys.stdin.readline()
-            return ""
+            line = sys.stdin.readline()
+            if line == "":
+                return current                # EOF: conservar lo guardado
+            return ""                         # enter: sin asignar
         for msg in port.iter_pending():
             if msg.type == "note_on" and msg.velocity > 0:
                 spec = f"note:{msg.channel}:{msg.note}"
@@ -187,7 +231,9 @@ def main():
 
     print("=== Configuración de lttileplayer ===")
 
+    songs_dir = ask_songs_dir(cfg.get("songs_dir") or DEFAULT_SONGS_DIR)
     audio["output"] = pick_audio_output(audio.get("output", ""))
+    audio["delay"] = ask_delay(float(audio.get("delay", DEFAULT_DELAY)))
 
     try:
         import mido
@@ -210,12 +256,12 @@ def main():
         buttons = {action: "" for action, _ in BUTTON_ACTIONS}
 
     write_config({
-        "songs_dir": cfg.get("songs_dir", "/home/angel/LGPT/songs"),
+        "songs_dir": songs_dir,
         "audio": {
             "output": audio["output"],
             "samplerate": audio.get("samplerate", 44100),
             "blocksize": audio.get("blocksize", 512),
-            "delay": audio.get("delay", 0.0),
+            "delay": audio["delay"],
         },
         "midi": midi,
         "buttons": buttons,

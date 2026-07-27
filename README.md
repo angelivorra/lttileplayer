@@ -38,21 +38,23 @@ Asistente interactivo (terminal, funciona también por SSH):
 .venv/bin/python lgpt_setup.py
 ```
 
-Pregunta la salida de audio (lista numerada de dispositivos), la salida
-MIDI, la entrada MIDI y luego pide pulsar cada botón del controlador:
+Pregunta la carpeta de canciones, la salida de audio (lista numerada de
+dispositivos), el delay del audio, la salida MIDI, la entrada MIDI y luego
+pide pulsar cada botón del controlador:
 **arriba, abajo, aceptar, play, stop** (captura note on o CC). En los
-menús, pulsar **enter** conserva el valor guardado en el sistema; en la
-captura de botones, enter deja el botón sin asignar. El resultado se
-guarda en `lttileplayer.toml`:
+menús, pulsar **enter** conserva el valor guardado en el sistema (si no
+hay valor previo: carpeta `/home/angel/Documentos/canciones/` y delay de
+1 segundo); en la captura de botones, enter deja el botón sin asignar.
+El resultado se guarda en `lttileplayer.toml`:
 
 ```toml
-songs_dir = "/home/angel/LGPT/songs"   # carpeta con proyectos lgpt_*
+songs_dir = "/home/angel/Documentos/canciones/"   # proyectos lgpt_*
 
 [audio]
 output = ""          # salida de audio (nombre/índice PortAudio; "" = defecto)
 samplerate = 44100
 blocksize = 512
-delay = 0.0          # retardo del audio en segundos (típico 0.5-1.0)
+delay = 1.0          # retardo del audio en segundos (típico 0.5-1.0)
 
 [midi]
 input = ""           # entrada MIDI CC ("" = primera disponible, "off" = no)
