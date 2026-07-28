@@ -16,7 +16,7 @@ output = "Midi Through"
 
 [channels]
 # Canales silenciados siempre (índice 0-7; 3 = pista 4).
-mute = [3]
+mute = [3, 4, 5, 6, 7]
 
 [buttons]
 # Botones del controlador: "note:canal:nota" o "cc:canal:control",
@@ -30,11 +30,11 @@ stop = "note:9:37"
 # Potenciómetros: cc = "cc:canal:control" (capturado aquí),
 # target = "canal:parametro" (canal LGPT 0-7; parametro:
 # lp_cutoff, lp_res, volume, pan, pitch; "" = sin asignar).
-pot1 = { cc = "cc:0:70", target = "2:lp_cutoff" }
+pot1 = { cc = "cc:0:70", target = "2:drive" }
 pot2 = { cc = "cc:0:71", target = "2:volume" }
 pot3 = { cc = "cc:0:72", target = "2:pan" }
 pot4 = { cc = "cc:0:73", target = "2:pitch" }
-pot5 = { cc = "cc:0:74", target = "2:lp_res" }
+pot5 = { cc = "cc:0:74", target = "2:lp_cutoff" }
 pot6 = { cc = "cc:0:75", target = "" }
 pot7 = { cc = "cc:0:76", target = "" }
 pot8 = { cc = "cc:0:77", target = "" }

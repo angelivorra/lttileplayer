@@ -150,8 +150,8 @@ class LadspaAutoFilter(LadspaPlugin):
 
     def __init__(self, sample_rate: int, path: str = CAPS_PATH):
         super().__init__(path, CAPS_AUTOFILTER_ID, sample_rate)
-        self.set_control(AF_MODE, 1.0)
-        self.set_control(AF_FILTER, 1.0)
+        self.set_control(AF_MODE, 0.0)         # 0 = low-pass (1 es HP!)
+        self.set_control(AF_FILTER, 0.0)
         self.set_control(AF_DEPTH, 1.0)
         self.set_control(AF_LFOENV, 0.0)
         self.set_control(AF_RATE, 0.25)
@@ -194,6 +194,48 @@ class LadspaStereoAutoFilter(LadspaStereoSVF):
     """C* AutoFilter estéreo (filtro acid del canal de bajo)."""
 
     _PLUGIN = LadspaAutoFilter
+
+
+FOVERDRIVE_PATH = "/usr/lib/ladspa/foverdrive_1196.so"
+FOVERDRIVE_ID = 1196
+
+# Puertos del Fast overdrive
+OD_DRIVE = 0            # 1-3 (1 = limpio)
+OD_INPUT = 1
+OD_OUTPUT = 2
+
+
+class LadspaOverdrive(LadspaPlugin):
+    """Fast overdrive (swh): drive 1-3; 1 = sin distorsión."""
+
+    def __init__(self, sample_rate: int, path: str = FOVERDRIVE_PATH):
+        super().__init__(path, FOVERDRIVE_ID, sample_rate)
+
+    def set(self, drive: float):
+        self.set_control(OD_DRIVE, min(max(drive, 1.0), 3.0))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, OD_INPUT, OD_OUTPUT)
+
+
+class LadspaStereoOverdrive:
+    """Dos instancias mono para el buffer estéreo del canal."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaOverdrive(sample_rate)
+        self.right = LadspaOverdrive(sample_rate)
+
+    def set(self, drive: float):
+        self.left.set(drive)
+        self.right.set(drive)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
 
 
 if __name__ == "__main__":

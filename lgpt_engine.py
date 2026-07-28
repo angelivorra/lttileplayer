@@ -562,6 +562,7 @@ class Channel:
         "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
         "groove", "g_pos", "g_ticks",
         "lp_cutoff", "lp_res", "lp_coef", "lp_state", "lp_ladspa",
+        "drive", "drive_ladspa",
     )
 
     def __init__(self, idx: int):
@@ -594,12 +595,14 @@ class Channel:
         self.g_pos = 0                         # paso dentro del groove
         self.g_ticks = 6                       # cuenta atrás de ticks del paso
         # Filtro LP con resonancia del canal (efecto live, no del upstream)
-        self.lp_cutoff = 1.0                   # 0-1 (1 = abierto)
+        self.lp_cutoff = 0.0                   # cantidad: 0 = bypass
         self.lp_res = 0.0                      # 0-1
         self.lp_coef: Optional[tuple] = None   # (b0,b1,b2,a1,a2)
         self.lp_state = [0.0, 0.0, 0.0, 0.0,   # x1,x2,y1,y2 (L)
                          0.0, 0.0, 0.0, 0.0]   # x1,x2,y1,y2 (R)
         self.lp_ladspa = None                  # LadspaStereoSVF | False
+        self.drive = 0.0                       # overdrive 0-1 (0 = limpio)
+        self.drive_ladspa = None               # LadspaStereoOverdrive | False
 
 
 # --------------------------------------------------------------------------
@@ -729,14 +732,14 @@ class Engine:
         self._drain_events()
         out = np.zeros((frames, 2), dtype=np.float32)
         if self.playing:
-            # Canales con filtro LP activo: renderizan a un buffer propio
-            # y se filtran al final del bloque
+            # Canales con efectos activos (drive y/o LP) renderizan a un
+            # buffer propio y se procesan al final del bloque
             fmap: dict[int, np.ndarray] = {}
             for ch in self.channels:
                 if ch.idx in self.muted:
                     continue
                 v = ch.voice
-                if v is not None and v.active and self._lp_active(ch):
+                if v is not None and v.active and self._ch_fx_active(ch):
                     buf = self._ch_bufs.get(ch.idx)
                     if buf is None or len(buf) < frames:
                         buf = np.zeros((max(frames, 1024), 2),
@@ -771,25 +774,48 @@ class Engine:
             for ci, buf in fmap.items():
                 ch = self.channels[ci]
                 block = buf[:frames]
+                self._render_drive(ch, block)
                 self._render_lp(ch, block)
                 out += block
             out *= self.master
             np.clip(out, -1.0, 1.0, out=out)
         return self._apply_delay(out)
 
+    def _ch_fx_active(self, ch: Channel) -> bool:
+        return ch.drive > 0.001 or ch.lp_cutoff > 0.001
+
     def _lp_active(self, ch: Channel) -> bool:
-        return ch.lp_cutoff < 0.999 or ch.lp_res > 0.001
+        return ch.lp_cutoff > 0.001
+
+    def _render_drive(self, ch: Channel, buf: np.ndarray):
+        """Overdrive del canal (Fast overdrive LADSPA; fallback tanh).
+        drive 0 = limpio (bypass)."""
+        if ch.drive <= 0.001:
+            return
+        if ch.drive_ladspa is None:
+            try:
+                from ladspa_fx import LadspaStereoOverdrive
+                ch.drive_ladspa = LadspaStereoOverdrive(self.sr)
+            except Exception:
+                ch.drive_ladspa = False
+        if ch.drive_ladspa:
+            ch.drive_ladspa.set(1.0 + 2.0 * ch.drive)
+            ch.drive_ladspa.run(buf)
+        else:
+            k = 1.0 + 20.0 * ch.drive
+            np.tanh(buf * k, out=buf)
 
     def _render_lp(self, ch: Channel, buf: np.ndarray):
-        """Filtro LP del canal: LADSPA SVF si está disponible (Raspberry
-        Pi con swh-plugins); si no, biquad RBJ propio.
+        """Filtro LP acid del canal (C* AutoFilter > SVF > biquad propio).
 
-        Mapeo: cutoff 80 Hz - 6 kHz (no se cierra del todo) y resonancia
-        0 - 0.95. Con cutoff a tope y resonancia a 0 el filtro no actúa
-        (bypass: sin efecto)."""
+        Mapeo con regla 0 = bypass: lp_cutoff es la CANTIDAD de efecto —
+        a 0 el filtro está abierto (3800 Hz, bypass) y al subir cierra
+        hacia 80 Hz con la resonancia subiendo hasta 0.85."""
         cut = ch.lp_cutoff
-        freq = 80.0 * (75.0 ** cut)              # 80 Hz .. 6 kHz
-        res = 0.95 * ch.lp_res
+        if cut <= 0.001:
+            return
+        freq = 3800.0 * (80.0 / 3800.0) ** cut     # 3800 Hz -> 80 Hz
+        res = 0.85 * cut
         if ch.lp_ladspa is None:
             # Preferencia: C* AutoFilter (acid) > SVF > biquad propio
             ch.lp_ladspa = False
@@ -913,6 +939,8 @@ class Engine:
             ch.lp_cutoff = val / 127.0
         elif name == "lp_res":
             ch.lp_res = val / 127.0
+        elif name == "drive":
+            ch.drive = val / 127.0
 
     # -- núcleo del secuenciador (Player::Trigger del upstream) ----------------
 

@@ -231,22 +231,36 @@ class TestVoices(unittest.TestCase):
         self.assertAlmostEqual(voice.base_speed, base)   # no cambia la base
 
     def test_lp_filter(self):
-        # Con cutoff al mínimo, un seno de 440 Hz debe atenuarse mucho
+        # lp_cutoff es cantidad de efecto: 127 = filtro cerrado (atenuado),
+        # 0 = bypass (sin cambios)
         engine = make_engine()
         note_row(engine.project, 0)
         engine._process_tick()
         open_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
-        engine.push_event("param", 0, "lp_cutoff", 0)
+        engine.push_event("param", 0, "lp_cutoff", 127)
         engine.render(4096)                  # deja asentar el filtro
         lp_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
         self.assertGreater(open_rms, 0.01)
         self.assertLess(lp_rms, open_rms * 0.2)
-        # La resonancia por sí sola no silencia
-        engine.push_event("param", 0, "lp_cutoff", 127)
-        engine.push_event("param", 0, "lp_res", 100)
+        engine.push_event("param", 0, "lp_cutoff", 0)
         engine.render(4096)
-        res_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
-        self.assertGreater(res_rms, open_rms * 0.3)
+        bypass_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
+        self.assertGreater(bypass_rms, open_rms * 0.5)
+
+    def test_drive(self):
+        # drive 0 = limpio; al subir distorsiona (cambia la forma de onda)
+        engine = make_engine()
+        note_row(engine.project, 0)
+        engine._process_tick()
+        engine.push_event("param", 0, "drive", 0)
+        clean = engine.render(4096).copy()
+        engine.push_event("param", 0, "drive", 127)
+        engine.render(2048)
+        driven = engine.render(4096)
+        rms_clean = float(np.sqrt((clean ** 2).mean()))
+        rms_driven = float(np.sqrt((driven ** 2).mean()))
+        self.assertGreater(rms_clean, 0.01)
+        self.assertNotAlmostEqual(rms_clean, rms_driven, places=3)
 
     def test_muted_channel(self):
         engine = make_engine()

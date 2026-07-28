@@ -503,13 +503,14 @@ class Player:
                 scr.addstr(y, 1, f"{ch.idx + 1} {note_name(note)} {instr:02X}",
                            curses.color_pair(2))
                 scr.addstr(y, 10, f"vol {meter(vol, mw)}"[:w - 11])
-                lp = ch.lp_cutoff
-                lp_attr = curses.color_pair(2) if lp < 0.999 or \
-                    ch.lp_res > 0.001 else curses.color_pair(3)
-                scr.addstr(y, 13 + mw, f"lp {meter(1.0 - lp, mw)}"[:w - 1],
-                           lp_attr)
-                scr.addstr(y, 24 + 2 * mw, f"rs {meter(ch.lp_res, mw)}"[:w - 1],
-                           lp_attr)
+                drv_attr = curses.color_pair(2) if ch.drive > 0.001 \
+                    else curses.color_pair(3)
+                lp_attr = curses.color_pair(2) if ch.lp_cutoff > 0.001 \
+                    else curses.color_pair(3)
+                scr.addstr(y, 13 + mw, f"drv {meter(ch.drive, mw)}"[:w - 1],
+                           drv_attr)
+                scr.addstr(y, 24 + 2 * mw, f"lp {meter(ch.lp_cutoff, mw)}"
+                           [:w - 1], lp_attr)
                 if wide:
                     if v is not None and v.cc_pan is not None:
                         pan_val = v.cc_pan
