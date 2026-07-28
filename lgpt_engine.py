@@ -839,13 +839,13 @@ class Engine:
 
         Mapeo con regla 0 = bypass: lp_cutoff es la CANTIDAD de efecto —
         a 0 el filtro está abierto (3800 Hz, bypass) y al subir cierra
-        hacia 160 Hz (suficiente para no apagar el bajo) con la
-        resonancia subiendo hasta 0.85."""
+        hacia 780 Hz (el 50% del recorrido log, para que el bajo no
+        pierda presencia del todo) con resonancia hasta 0.43."""
         cut = ch.lp_cutoff
         if cut <= 0.001:
             return
-        freq = 3800.0 * (160.0 / 3800.0) ** cut    # 3800 Hz -> 160 Hz
-        res = 0.85 * cut
+        freq = 3800.0 * (160.0 / 3800.0) ** (cut * 0.5)   # 3800 -> 780 Hz
+        res = 0.85 * cut * 0.5                            # hasta 0.43
         if ch.lp_ladspa is None:
             # Preferencia: C* AutoFilter (acid) > SVF > biquad propio
             ch.lp_ladspa = False

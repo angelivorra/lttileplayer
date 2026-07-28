@@ -231,10 +231,11 @@ class TestVoices(unittest.TestCase):
         self.assertAlmostEqual(voice.base_speed, base)   # no cambia la base
 
     def test_lp_filter(self):
-        # lp_cutoff es cantidad de efecto: 127 = filtro cerrado (atenuado),
-        # 0 = bypass (sin cambios)
+        # lp_cutoff es cantidad de efecto: 127 = filtro al 50% del
+        # recorrido (~780 Hz); con una nota aguda (1760 Hz) debe atenuar,
+        # y a 0 es bypass
         engine = make_engine()
-        note_row(engine.project, 0)
+        note_row(engine.project, 0, note=84)   # 440 Hz * 4 = 1760 Hz
         engine._process_tick()
         open_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
         engine.push_event("param", 0, "lp_cutoff", 127)
