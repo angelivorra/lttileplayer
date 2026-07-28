@@ -25,14 +25,12 @@ Teclas:
 from __future__ import annotations
 
 import argparse
+import math
 import queue
-import select
 import sys
-import termios
 import threading
 import time
 import tomllib
-import tty
 from pathlib import Path
 
 import sounddevice as sd
@@ -62,17 +60,48 @@ def find_projects(songs_dir: Path) -> list[Path]:
 
 
 def _pick_port(names: list[str], wanted: str | None, what: str) -> str | None:
-    """Resuelve un puerto MIDI por nombre parcial."""
+    """Resuelve un puerto MIDI por nombre parcial. Si el nombre guardado
+    incluye el id de cliente ALSA ("... 128:0"), también se prueba sin él
+    (el número cambia entre arranques)."""
     if not names:
         print(f"[midi] no hay puertos MIDI de {what}; desactivado")
         return None
     if wanted:
+        base = wanted.rsplit(" ", 1)[0]      # sin el "client:port" final
         for n in names:
-            if wanted.lower() in n.lower():
+            if wanted.lower() in n.lower() or base.lower() in n.lower():
                 return n
         print(f"[midi] puerto '{wanted}' no encontrado; disponibles: {names}")
         return None
     return names[0]
+
+
+class WavRecorder:
+    """Graba la salida de audio a un WAV sin bloquear el callback:
+    el callback encola bloques y un hilo escritor los vuelca a disco."""
+
+    def __init__(self, path: str, samplerate: int):
+        import soundfile as sf
+        self._sf = sf.SoundFile(path, "w", samplerate=samplerate,
+                                channels=2, subtype="PCM_16")
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            block = self._queue.get()
+            if block is None:
+                break
+            self._sf.write(block)
+        self._sf.close()
+
+    def write(self, block):
+        self._queue.put(block.copy())
+
+    def close(self):
+        self._queue.put(None)
+        self._thread.join()
 
 
 class MidoMidiOut(MidiOut):
@@ -132,18 +161,33 @@ def match_button(mapping: dict, msg) -> str | None:
     return None
 
 
-def match_pot(mapping: dict, msg) -> str | None:
-    """Devuelve el parámetro del pot que coincide con el mensaje, o None.
+def parse_pot_target(target: str) -> tuple | None:
+    """'canal:parametro' -> (canal, parametro); None si no es válido."""
+    try:
+        ch, name = target.split(":")
+        ch = int(ch)
+    except (ValueError, AttributeError):
+        return None
+    if not 0 <= ch < 8 or not name:
+        return None
+    return (ch, name)
 
-    mapping: parámetro -> spec de parse_button_spec() ("cc:canal:control")."""
+
+def match_pot(pots: list, msg) -> tuple | None:
+    """Devuelve (canal, parámetro) del pot que coincide con el mensaje.
+
+    pots: lista de (spec, target) donde target es (canal|None, param);
+    canal None = se deriva del canal MIDI del mensaje (% 8)."""
     if msg.type != "control_change":
         return None
-    for param, spec in mapping.items():
+    for spec, target in pots:
         if spec is None:
             continue
-        _mtype, ch, num = spec
-        if msg.channel == ch and msg.control == num:
-            return param
+        mtype, ch, num = spec
+        if mtype == "control_change" and msg.channel == ch \
+                and msg.control == num:
+            tch, tparam = target
+            return (msg.channel % 8 if tch is None else tch), tparam
     return None
 
 
@@ -169,9 +213,15 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
     if chosen is None:
         return None
 
-    use_pots = any(spec is not None for spec in pots.values())
+    use_pots = bool(pots)
 
     def on_message(msg):
+        rq = engine_ref.get("raw_queue")
+        if rq is not None:
+            num = getattr(msg, "note", getattr(msg, "control", 0))
+            rq.put((msg.type, getattr(msg, "channel", 0), num))
+        if engine_ref.get("capture_mode"):
+            return                          # CONFIG capturando: no disparar
         # Los botones mapeados tienen prioridad sobre pots y CC
         action = match_button(buttons, msg)
         if action is not None:
@@ -181,9 +231,10 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
         if engine is None:
             return
         if use_pots:
-            param = match_pot(pots, msg)
-            if param is not None:
-                engine.push_event("param", msg.channel % 8, param, msg.value)
+            hit = match_pot(pots, msg)
+            if hit is not None:
+                tch, tparam = hit
+                engine.push_event("param", tch, tparam, msg.value)
         elif msg.type == "control_change":
             engine.push_event("cc", msg.channel % 8, msg.control, msg.value)
 
@@ -216,35 +267,93 @@ def open_midi_output(port_name: str | None) -> MidoMidiOut | None:
     return MidoMidiOut(port, mido)
 
 
-class Keyboard:
-    """Lectura no bloqueante de teclas en modo raw (stdin es un TTY)."""
+NOTE_NAMES = ["C-", "C#", "D-", "D#", "E-", "F-",
+              "F#", "G-", "G#", "A-", "A#", "B-"]
 
-    def __init__(self):
-        self._fd = sys.stdin.fileno()
-        self._old = termios.tcgetattr(self._fd)
+# Microfuente 3x5 para el título y la lista de canciones (estética retro)
+FONT3X5 = {
+    "A": [" # ", "# #", "###", "# #", "# #"],
+    "B": ["## ", "# #", "## ", "# #", "## "],
+    "C": [" ##", "#  ", "#  ", "#  ", " ##"],
+    "D": ["## ", "# #", "# #", "# #", "## "],
+    "E": ["###", "#  ", "## ", "#  ", "###"],
+    "F": ["###", "#  ", "## ", "#  ", "#  "],
+    "G": [" ##", "#  ", "# #", "# #", " ##"],
+    "H": ["# #", "# #", "###", "# #", "# #"],
+    "I": ["###", " # ", " # ", " # ", "###"],
+    "J": ["  #", "  #", "  #", "# #", " # "],
+    "K": ["# #", "# #", "## ", "# #", "# #"],
+    "L": ["#  ", "#  ", "#  ", "#  ", "###"],
+    "M": ["# #", "###", "###", "# #", "# #"],
+    "N": ["# #", "## ", "###", " ##", "# #"],
+    "O": [" # ", "# #", "# #", "# #", " # "],
+    "P": ["## ", "# #", "## ", "#  ", "#  "],
+    "Q": [" # ", "# #", "# #", " ##", "  #"],
+    "R": ["## ", "# #", "## ", "# #", "# #"],
+    "S": [" ##", "#  ", " # ", "  #", "## "],
+    "T": ["###", " # ", " # ", " # ", " # "],
+    "U": ["# #", "# #", "# #", "# #", "###"],
+    "V": ["# #", "# #", "# #", "# #", " # "],
+    "W": ["# #", "# #", "###", "###", "# #"],
+    "X": ["# #", "# #", " # ", "# #", "# #"],
+    "Y": ["# #", "# #", " # ", " # ", " # "],
+    "Z": ["###", "  #", " # ", "#  ", "###"],
+    "0": [" # ", "# #", "# #", "# #", " # "],
+    "1": [" # ", "## ", " # ", " # ", "###"],
+    "2": ["## ", "  #", " # ", "#  ", "###"],
+    "3": ["## ", "  #", " # ", "  #", "## "],
+    "4": ["# #", "# #", "###", "  #", "  #"],
+    "5": ["###", "#  ", "## ", "  #", "## "],
+    "6": [" ##", "#  ", "## ", "# #", " # "],
+    "7": ["###", "  #", " # ", " # ", " # "],
+    "8": [" # ", "# #", " # ", "# #", " # "],
+    "9": [" # ", "# #", " ##", "  #", "## "],
+    "-": ["   ", "   ", "###", "   ", "   "],
+    ".": ["   ", "   ", "   ", "   ", " # "],
+    " ": ["   ", "   ", "   ", "   ", "   "],
+}
 
-    def __enter__(self):
-        tty.setcbreak(self._fd)
-        return self
 
-    def __exit__(self, *exc):
-        termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old)
+def big_text(scr, y: int, x: int, text: str, scale: int, attr):
+    """Dibuja `text` con la microfuente 3x5 escalada en bloques."""
+    for i, ch in enumerate(text):
+        glyph = FONT3X5.get(ch, FONT3X5[" "])
+        for r, line in enumerate(glyph):
+            for c, px in enumerate(line):
+                if px != " ":
+                    scr.addstr(y + r * scale, x + i * 4 * scale + c * scale,
+                               "█" * scale, attr)
 
-    def read(self, timeout: float = 0.0) -> str | None:
-        r, _, _ = select.select([sys.stdin], [], [], timeout)
-        if not r:
-            return None
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":                      # posible secuencia de escape
-            r, _, _ = select.select([sys.stdin], [], [], 0.01)
-            if r:
-                seq = ch + sys.stdin.read(1)
-                r, _, _ = select.select([sys.stdin], [], [], 0.01)
-                if r:
-                    seq += sys.stdin.read(1)
-                return {"\x1b[A": "up", "\x1b[B": "down"}.get(seq)
-            return "esc"
-        return ch
+
+def display_name(dirname: str) -> str:
+    """Nombre de canción para la lista: sin 'lgpt_', corto y en mayúsculas."""
+    name = dirname
+    if name.startswith("lgpt_"):
+        name = name[5:]
+    name = name.split(".")[0]
+    return name.upper()[:10]
+
+
+def note_name(n) -> str:
+    if n is None or n >= 0x80:
+        return "---"
+    return f"{NOTE_NAMES[n % 12]}{n // 12 - 2}"
+
+
+def meter(value: float, width: int = 8) -> str:
+    """Medidor retro de bloques: value 0-1."""
+    value = min(max(value, 0.0), 1.0)
+    filled = round(value * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def pan_meter(pan: int, width: int = 5) -> str:
+    """Indicador de pan de `width` celdas con marca."""
+    pan = min(max(pan, 0), 254)
+    pos = round(pan / 254 * (width - 1))
+    cells = ["·"] * width
+    cells[pos] = "█"
+    return "".join(cells)
 
 
 class Player:
@@ -259,6 +368,7 @@ class Player:
         self.engine_ref: dict = {}
         self.midi_in = None
         self.midi_out: MidoMidiOut | None = None
+        self.recorder: WavRecorder | None = None
         self.stream = sd.OutputStream(
             samplerate=args.samplerate,
             channels=2,
@@ -267,7 +377,6 @@ class Player:
             device=args.device or None,
             callback=self._audio_callback,
         )
-        self._last_status = ""
 
     # -- audio ----------------------------------------------------------------
 
@@ -275,12 +384,14 @@ class Player:
         engine = self.engine_ref.get("engine")
         if engine is None:
             outdata[:] = 0
-            return
-        outdata[:] = engine.render(frames)
+        else:
+            outdata[:] = engine.render(frames)
+        recorder = self.recorder
+        if recorder is not None:
+            recorder.write(outdata)
 
     def _load_song(self, index: int):
         project_dir = self.projects[index]
-        print(f"\rCargando {project_dir.name}...{' ' * 20}", end="", flush=True)
         old = self.engine_ref.get("engine")
         if old is not None:
             old.panic()                   # note off de notas MIDI colgadas
@@ -291,118 +402,523 @@ class Player:
         self.engine_ref["engine"] = engine   # swap atómico de referencia
         return engine
 
-    # -- UI -------------------------------------------------------------------
-
-    def _draw_list(self):
-        sys.stdout.write("\x1b[2J\x1b[H")      # limpia pantalla
-        print("Proyectos LGPT (↑↓/j/k + enter, q salir):\n")
-        for i, p in enumerate(self.projects):
-            marker = ">" if i == self.index else " "
-            print(f" {marker} {p.name}")
-        sys.stdout.flush()
-
-    def _draw_status(self, engine: Engine):
-        if engine.finished:
-            state = "STOP"
-        elif engine.playing:
-            state = "PLAY"
-        else:
-            state = "PAUSA"
-        row = max(engine.song_positions())
-        status = (f"{state} {engine.project.dir.name}  "
-                  f"{engine.tempo} BPM  fila {row:02X}  "
-                  f"canales {engine.active_channels()}  "
-                  f"[espacio=play/pausa n=sig p=ant q=lista]")
-        if status != self._last_status:
-            self._last_status = status
-            sys.stdout.write("\r\x1b[K" + status)
-            sys.stdout.flush()
+    # -- UI curses --------------------------------------------------------------
 
     def _poll_buttons(self, context: str) -> str | None:
-        """Traduce una acción de botón pendiente a la tecla equivalente.
-
-        Lista: up/down = moverse, accept/play = seleccionar.
-        Canción: play/accept = play/pausa, stop = volver a la lista,
-        up/down = anterior/siguiente.
-        """
+        """Traduce una acción de botón pendiente a la tecla equivalente."""
         try:
             action = self.ui_queue.get_nowait()
         except queue.Empty:
             return None
         if context == "list":
             return {"up": "up", "down": "down",
-                    "accept": "\n", "play": "\n"}.get(action)
+                    "play": "\n", "stop": "c"}.get(action)
         return {"up": "p", "down": "n",
-                "accept": " ", "play": " ", "stop": "q"}.get(action)
+                "play": " ", "stop": "q"}.get(action)
 
     def _drain_buttons(self):
-        """Descarta pulsaciones acumuladas al cambiar de vista."""
         while True:
             try:
                 self.ui_queue.get_nowait()
             except queue.Empty:
                 return
 
-    def run_list(self) -> bool:
-        """Menú de selección. Devuelve False para salir del programa."""
-        self._drain_buttons()
-        self._draw_list()
-        while True:
-            key = self.kb.read(0.2) or self._poll_buttons("list")
+    def _draw_list(self, scr, curses):
+        """ROBOTRACA pequeño + 3 canciones centradas (scroll infinito);
+        la seleccionada al doble de tamaño. Estética Pip-Boy."""
+        scr.erase()
+        h, w = scr.getmaxyx()
+        names = [display_name(p.name) for p in self.projects]
+        n = len(names)
+        prev = names[(self.index - 1) % n]
+        current = names[self.index]
+        nxt = names[(self.index + 1) % n]
+        sel_scale = 2 if len(current) * 8 <= w else 1
+        # bloque: título (5 filas) + regla + prev + seleccionada + next
+        total_rows = 5 + 2 + 1 + 5 * sel_scale + 1
+        y0 = max(0, (h - total_rows) // 2)
+        x_title = max(0, (w - 9 * 4) // 2)
+        big_text(scr, y0, x_title, "ROBOTRACA", 1, self._pair_bright)
+        y = y0 + 5
+        rule_w = min(w - 4, 9 * 4 + 8)
+        scr.addstr(y, max(0, (w - rule_w) // 2), "─" * rule_w,
+                   self._pair_dim)
+        y += 2
+        scr.addstr(y, max(0, (w - len(prev)) // 2), prev,
+                   self._pair_dim)
+        y += 1
+        big_text(scr, y, max(0, (w - len(current) * 4 * sel_scale) // 2),
+                 current, sel_scale, self._pair_sel)
+        y += 5 * sel_scale + 1
+        scr.addstr(y, max(0, (w - len(nxt)) // 2), nxt,
+                   self._pair_dim)
+        scr.refresh()
+
+    def _draw_song(self, scr, curses, engine: Engine):
+        scr.erase()
+        h, w = scr.getmaxyx()
+        wide = w >= 68
+        mw = 8 if wide else 4
+        if engine.finished:
+            state, color = "STOP ", 6
+        elif engine.playing:
+            state, color = "PLAY ", 2
+        else:
+            state, color = "PAUSA", 5
+        row = max(engine.song_positions())
+        scr.addstr(0, 1, state, curses.color_pair(color) | curses.A_BOLD)
+        scr.addstr(0, 7, engine.project.dir.name[:w - 8],
+                   curses.color_pair(1) | curses.A_BOLD)
+        if wide:
+            scr.addstr(0, 30, f"{engine.tempo} BPM  fila {row:02X}  "
+                              f"{meter(row / 255, 12)}"[:w - 31])
+        for ch in engine.channels:
+            y = 2 + ch.idx
+            v = ch.voice
+            sounding = (v is not None and v.active) or ch.midi_note is not None
+            if sounding:
+                note = v.note if v is not None else ch.last_note
+                instr = ch.last_instr if ch.last_instr is not None else 0
+                vol = (v.vol_cur / 255.0 * ch.cc_vol) if v is not None else 0.0
+                scr.addstr(y, 1, f"{ch.idx + 1} {note_name(note)} {instr:02X}",
+                           curses.color_pair(2))
+                scr.addstr(y, 10, f"vol {meter(vol, mw)}"[:w - 11])
+                lp = ch.lp_cutoff
+                lp_attr = curses.color_pair(2) if lp < 0.999 or \
+                    ch.lp_res > 0.001 else curses.color_pair(3)
+                scr.addstr(y, 13 + mw, f"lp {meter(1.0 - lp, mw)}"[:w - 1],
+                           lp_attr)
+                scr.addstr(y, 24 + 2 * mw, f"rs {meter(ch.lp_res, mw)}"[:w - 1],
+                           lp_attr)
+                if wide:
+                    if v is not None and v.cc_pan is not None:
+                        pan_val = v.cc_pan
+                    elif v is not None:
+                        pan_val = v.pan
+                    else:
+                        pan_val = 127
+                    scr.addstr(y, 43, f"pan {pan_meter(pan_val)}")
+                    semis = 12.0 * math.log2(ch.cc_pitch)
+                    scr.addstr(y, 52, f"pit {semis:+4.1f}")
+            else:
+                scr.addstr(y, 1, f"{ch.idx + 1} --- --",
+                           curses.color_pair(3))
+                if ch.playing:
+                    scr.addstr(y, 10, "·", curses.color_pair(3))
+        scr.addstr(h - 1, 1, "espacio: pausa  n/p: canción  q: lista"[:w - 2],
+                   curses.color_pair(3))
+        scr.refresh()
+
+    def _curses_main(self, scr):
+        import curses
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass                      # terminal sin cursor configurable
+        curses.start_color()
+        try:
+            curses.use_default_colors()
+            bg = -1
+        except curses.error:
+            bg = curses.COLOR_BLACK   # consola linux sin orig_pair
+        # Paleta ROBOTRACA (terminal Pip-Boy: verde fósforo monocromo,
+        # ámbar para estados; se complementa con setvtrgb en tty1)
+        curses.init_pair(1, curses.COLOR_GREEN, bg)      # título/brillante
+        curses.init_pair(2, curses.COLOR_GREEN, bg)      # selección
+        curses.init_pair(3, curses.COLOR_GREEN, bg)      # secundario (dim)
+        curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_GREEN)
+        curses.init_pair(5, curses.COLOR_YELLOW, bg)     # pausa (ámbar)
+        curses.init_pair(6, curses.COLOR_RED, bg)        # stop (ámbar osc)
+        self._pair_bright = curses.color_pair(1) | curses.A_BOLD
+        self._pair_sel = curses.color_pair(2) | curses.A_BOLD
+        self._pair_dim = curses.color_pair(3) | curses.A_DIM
+        scr.timeout(100)
+        engine = None
+        while True:                       # vista lista
+            self._drain_buttons()
+            try:
+                self._draw_list(scr, curses)
+            except curses.error:
+                pass                      # pantalla pequeña: recorte
+            key = self._read_key(scr, curses, "list")
             if key is None:
                 continue
             if key in ("q", "esc"):
-                return False
-            if key in ("up", "k"):
+                return
+            if key == "c":
+                self._config_view(scr, curses)
+                self.projects = find_projects(Path(self.args.songs)) or \
+                    self.projects
+                self.index %= len(self.projects)
+            elif key in ("up", "k"):
                 self.index = (self.index - 1) % len(self.projects)
-                self._draw_list()
             elif key in ("down", "j"):
                 self.index = (self.index + 1) % len(self.projects)
-                self._draw_list()
             elif key in ("\r", "\n"):
-                return True
+                engine = self._load_song(self.index)
+                self._drain_buttons()
+                while True:               # vista canción
+                    try:
+                        self._draw_song(scr, curses, engine)
+                    except curses.error:
+                        pass              # pantalla pequeña: recorte
+                    key = self._read_key(scr, curses, "song")
+                    if key is None:
+                        continue
+                    if key == " ":
+                        engine.push_event(
+                            "pause" if engine.playing else "play")
+                    elif key == "n":
+                        self.index = (self.index + 1) % len(self.projects)
+                        engine = self._load_song(self.index)
+                    elif key == "p":
+                        self.index = (self.index - 1) % len(self.projects)
+                        engine = self._load_song(self.index)
+                    elif key in ("q", "esc"):
+                        engine.push_event("stop")
+                        self.engine_ref["engine"] = None
+                        break
 
-    def run_song(self):
-        sys.stdout.write("\x1b[2J\x1b[H")
-        engine = self._load_song(self.index)
-        self._last_status = ""
-        self._drain_buttons()
+    def _config_view(self, scr, curses):
+        """Pantalla de configuración: edita lttileplayer.toml en el propio
+        dispositivo (audio, MIDI, botones, pots, delay)."""
+        from lgpt_setup import POT_DEFAULT_TARGETS, write_config
+        cfg_path = Path(self.args.config)
+        cfg = load_config(cfg_path)
+        cfg.setdefault("audio", {})
+        cfg.setdefault("midi", {})
+        cfg.setdefault("buttons", {})
+        cfg.setdefault("pots", {})
+
+        def current_values():
+            b = cfg["buttons"]
+            nb = sum(1 for v in b.values() if v)
+            npots = sum(1 for v in cfg["pots"].values()
+                        if isinstance(v, dict) and v.get("cc"))
+            return [
+                ("audio", "Salida de audio",
+                 cfg["audio"].get("output") or "(por defecto)"),
+                ("midi_out", "Salida MIDI",
+                 cfg["midi"].get("output") or "(desactivada)"),
+                ("midi_in", "Entrada MIDI",
+                 cfg["midi"].get("input") or "(auto)"),
+                ("buttons", "Capturar botones", f"{nb}/4 asignados"),
+                ("pots", "Capturar potenciómetros", f"{npots}/8 asignados"),
+                ("save", "» GUARDAR y volver", ""),
+                ("back", "» Volver sin guardar", ""),
+            ]
+
+        sel = 0
         while True:
-            self._draw_status(engine)
-            key = self.kb.read(0.1) or self._poll_buttons("song")
+            fields = current_values()
+            scr.erase()
+            h, w = scr.getmaxyx()
+            scr.addstr(1, 2, "CONFIGURACIÓN",
+                       curses.color_pair(1) | curses.A_BOLD)
+            for i, (_key, label, value) in enumerate(fields):
+                attr = curses.color_pair(4) if i == sel else 0
+                scr.addstr(3 + i, 2, f"{label:<26}"[:26], attr)
+                if value:
+                    scr.addstr(3 + i, 29, value[:w - 31], attr)
+            scr.addstr(h - 2, 2, "↑↓: moverse   enter: editar   "
+                                 "q: volver", curses.color_pair(3))
+            scr.addstr(h - 1, 2, "audio/puertos MIDI: se aplican al "
+                                 "reiniciar el player", curses.color_pair(3))
+            scr.refresh()
+            key = self._read_key(scr, curses, "list")
             if key is None:
                 continue
-            if key == " ":
-                engine.push_event("pause" if engine.playing else "play")
-            elif key == "n":
-                self.index = (self.index + 1) % len(self.projects)
-                engine = self._load_song(self.index)
-                self._last_status = ""
-            elif key == "p":
-                self.index = (self.index - 1) % len(self.projects)
-                engine = self._load_song(self.index)
-                self._last_status = ""
-            elif key in ("q", "esc"):
-                engine.push_event("stop")
-                self.engine_ref["engine"] = None
+            if key in ("q", "esc", "c"):
                 return
+            if key in ("up", "k"):
+                sel = (sel - 1) % len(fields)
+            elif key in ("down", "j"):
+                sel = (sel + 1) % len(fields)
+            elif key in ("\r", "\n"):
+                action = fields[sel][0]
+                if action == "back":
+                    return
+                if action == "save":
+                    write_config(cfg, cfg_path)
+                    self._apply_live_config(cfg)
+                    return
+                if action == "audio":
+                    devs = ["(por defecto del sistema)"] + [
+                        d["name"] for d in sd.query_devices()
+                        if d["max_output_channels"] > 0]
+                    cur = cfg["audio"].get("output") or devs[0]
+                    val = self._choose(scr, curses, "Salida de audio",
+                                       devs, cur)
+                    if val is not None:
+                        cfg["audio"]["output"] = "" if val == devs[0] else val
+                elif action == "midi_out":
+                    val = self._choose_midi(scr, curses, "salida",
+                                            cfg["midi"].get("output", ""))
+                    if val is not None:
+                        cfg["midi"]["output"] = val
+                elif action == "midi_in":
+                    val = self._choose_midi(scr, curses, "entrada",
+                                            cfg["midi"].get("input", ""))
+                    if val is not None:
+                        cfg["midi"]["input"] = val
+                elif action == "buttons":
+                    self._capture_view(scr, curses, cfg["buttons"],
+                                       [("up", "ARRIBA"), ("down", "ABAJO"),
+                                        ("play", "PLAY"),
+                                        ("stop", "STOP")], None)
+                elif action == "pots":
+                    entries = []
+                    for n in range(1, 9):
+                        e = cfg["pots"].get(f"pot{n}", {})
+                        target = (e.get("target")
+                                  or POT_DEFAULT_TARGETS.get(n, ""))
+                        entries.append((f"pot{n}", f"POT {n} ({target or 'libre'})",
+                                        target))
+                    self._capture_view(scr, curses, cfg["pots"], entries,
+                                       POT_DEFAULT_TARGETS)
+
+    def _wait_midi_spec(self, scr, curses) -> str | None:
+        """Espera un note on o CC y devuelve el spec; None si se cancela."""
+        rq = self.engine_ref.get("raw_queue")
+        if rq is not None:
+            while True:
+                try:
+                    rq.get_nowait()
+                except queue.Empty:
+                    break
+        while True:
+            key = scr.getch()
+            if key in (10, 13, 27, ord("q")):
+                return None
+            if rq is not None:
+                try:
+                    mtype, ch, num = rq.get_nowait()
+                    if mtype == "note_on":
+                        return f"note:{ch}:{num}"
+                    if mtype == "control_change":
+                        return f"cc:{ch}:{num}"
+                except queue.Empty:
+                    pass
+            time.sleep(0.05)
+
+    def _wait_quiet_midi(self, seconds: float = 0.6):
+        """Espera a que deje de llegar MIDI (pot soltado)."""
+        rq = self.engine_ref.get("raw_queue")
+        quiet_since = None
+        while True:
+            got = False
+            if rq is not None:
+                while True:
+                    try:
+                        rq.get_nowait()
+                        got = True
+                    except queue.Empty:
+                        break
+            if got:
+                quiet_since = None
+            elif quiet_since is None:
+                quiet_since = time.time()
+            elif time.time() - quiet_since >= seconds:
+                return
+            time.sleep(0.05)
+
+    def _apply_live_config(self, cfg: dict):
+        """Botones y pots se aplican en caliente tras guardar."""
+        self.buttons.clear()
+        self.buttons.update({
+            a: parse_button_spec(s)
+            for a, s in cfg.get("buttons", {}).items()})
+        self.args.pots.clear()
+        for key, entry in cfg.get("pots", {}).items():
+            if isinstance(entry, dict):
+                spec = parse_button_spec(entry.get("cc", ""))
+                target = parse_pot_target(entry.get("target", ""))
+            else:
+                spec = parse_button_spec(entry)
+                target = (None, key) if spec else None
+            if spec is not None and target is not None:
+                self.args.pots.append((spec, target))
+
+    # -- widgets de la pantalla CONFIG ------------------------------------------
+
+    def _choose(self, scr, curses, title, options, current) -> str | None:
+        sel = options.index(current) if current in options else 0
+        while True:
+            scr.erase()
+            scr.addstr(1, 2, title, curses.color_pair(1) | curses.A_BOLD)
+            for i, opt in enumerate(options[:12]):
+                attr = curses.color_pair(4) if i == sel else 0
+                mark = " *" if opt == current else ""
+                scr.addstr(3 + i, 2, f"{opt}{mark}"[:70], attr)
+            scr.addstr(14, 2, "↑↓ + enter   q: cancelar", curses.color_pair(3))
+            scr.refresh()
+            key = self._read_key(scr, curses, "list")
+            if key in ("q", "esc"):
+                return None
+            if key in ("up", "k"):
+                sel = (sel - 1) % len(options[:12])
+            elif key in ("down", "j"):
+                sel = (sel + 1) % len(options[:12])
+            elif key in ("\r", "\n"):
+                return options[sel]
+
+    def _choose_midi(self, scr, curses, kind, current) -> str | None:
+        import mido
+        if kind == "salida":
+            names = mido.get_output_names()
+            options = names + ["virtual", "off"]
+        else:
+            names = mido.get_input_names()
+            options = names + ["auto", "off"]
+        cur = current if current in options else (
+            "virtual" if current == "virtual" else options[0])
+        val = self._choose(scr, curses, f"Puerto MIDI de {kind}:", options, cur)
+        if val is None:
+            return None
+        if kind == "salida":
+            return "" if val == "off" else val
+        return "" if val == "auto" else val
+
+    def _capture_view(self, scr, curses, store: dict, entries, defaults):
+        """Captura de botones/pots: lista acciones, enter espera un evento
+        MIDI y guarda el spec. store se edita en vivo."""
+        sel = 0
+        while True:
+            scr.erase()
+            h, w = scr.getmaxyx()
+            scr.addstr(1, 2, "CAPTURA MIDI", curses.color_pair(1) | curses.A_BOLD)
+            for i, entry in enumerate(entries):
+                key_name, label = entry[0], entry[1]
+                cur = store.get(key_name, "")
+                if isinstance(cur, dict):
+                    cur = cur.get("cc", "")
+                attr = curses.color_pair(4) if i == sel else 0
+                scr.addstr(3 + i, 2, f"{label:<28}"[:28], attr)
+                scr.addstr(3 + i, 31, (cur or "---")[:w - 33], attr)
+            scr.addstr(h - 1, 2, "enter: capturar   d: borrar   q: volver",
+                       curses.color_pair(3))
+            scr.refresh()
+            key = self._read_key(scr, curses, "list")
+            if key in ("q", "esc"):
+                return
+            if key in ("up", "k"):
+                sel = (sel - 1) % len(entries)
+            elif key in ("down", "j"):
+                sel = (sel + 1) % len(entries)
+            elif key == "d":
+                self._store_spec(store, entries[sel], "", defaults)
+            elif key in ("\r", "\n"):
+                self._capture_one(scr, curses, store, entries[sel], defaults)
+
+    def _store_spec(self, store, entry, spec, defaults):
+        key_name = entry[0]
+        if key_name.startswith("pot"):
+            n = int(key_name[3:])
+            target = entry[2] if len(entry) > 2 else \
+                (defaults or {}).get(n, "")
+            store[key_name] = {"cc": spec, "target": target}
+        else:
+            store[key_name] = spec
+
+    def _capture_one(self, scr, curses, store, entry, defaults):
+        """Espera un evento MIDI y lo guarda; luego aguarda a que el flujo
+        pare (para no capturar el mismo pot dos veces)."""
+        self.engine_ref["capture_mode"] = True
+        rq = self.engine_ref.get("raw_queue")
+        try:
+            scr.addstr(2, 31, "esperando MIDI... (enter: cancela)",
+                       curses.color_pair(5))
+            scr.refresh()
+            if rq is not None:
+                while True:
+                    try:
+                        rq.get_nowait()
+                    except queue.Empty:
+                        break
+            spec = None
+            while spec is None:
+                key = scr.getch()
+                if key in (10, 13, 27, ord("q")):
+                    return
+                if rq is not None:
+                    try:
+                        mtype, ch, num = rq.get_nowait()
+                        if mtype == "note_on":
+                            spec = f"note:{ch}:{num}"
+                        elif mtype == "control_change":
+                            spec = f"cc:{ch}:{num}"
+                    except queue.Empty:
+                        pass
+                time.sleep(0.05)
+            self._store_spec(store, entry, spec, defaults)
+            scr.addstr(2, 31, f"{spec} — suelta el pot...          ")
+            scr.refresh()
+            # espera a que el flujo MIDI se detenga (0.6 s en silencio)
+            quiet_since = None
+            while True:
+                got = False
+                if rq is not None:
+                    while True:
+                        try:
+                            rq.get_nowait()
+                            got = True
+                        except queue.Empty:
+                            break
+                if got:
+                    quiet_since = None
+                elif quiet_since is None:
+                    quiet_since = time.time()
+                elif time.time() - quiet_since >= 0.6:
+                    return
+                time.sleep(0.05)
+        finally:
+            self.engine_ref["capture_mode"] = False
+            scr.addstr(2, 31, " " * 40)
+
+    def _read_key(self, scr, curses, context: str) -> str | None:
+        key = scr.getch()
+        if key != -1:
+            if key in (curses.KEY_UP,):
+                return "up"
+            if key in (curses.KEY_DOWN,):
+                return "down"
+            if key == 27:
+                return "esc"
+            try:
+                return chr(key)
+            except ValueError:
+                return None
+        return self._poll_buttons(context)
+
+    def _run_headless(self):
+        """Sin TTY: solo audio + botones MIDI (modo servicio)."""
+        while True:
+            time.sleep(1.0)
 
     def run(self):
         self.midi_out = open_midi_output(self.args.midi_out)
+        self.engine_ref["raw_queue"] = queue.SimpleQueue()
         self.midi_in = open_midi_input(
             self.args.midi, self.engine_ref, self.ui_queue, self.buttons,
             self.args.pots)
+        if self.args.record:
+            self.recorder = WavRecorder(self.args.record, self.args.samplerate)
+            print(f"[audio] grabando salida en {self.args.record}")
         self.stream.start()
         try:
-            with Keyboard() as self.kb:
-                while self.run_list():
-                    self.run_song()
+            if sys.stdin.isatty():
+                import curses
+                curses.wrapper(self._curses_main)
+            else:
+                self._run_headless()
         finally:
             engine = self.engine_ref.get("engine")
             if engine is not None:
                 engine.panic()
             self.stream.stop()
             self.stream.close()
+            if self.recorder is not None:
+                self.recorder.close()
             if self.midi_in is not None:
                 self.midi_in.close()
             if self.midi_out is not None:
@@ -426,6 +942,8 @@ def main():
     parser.add_argument("--blocksize", type=int, default=None)
     parser.add_argument("--delay", type=float, default=None,
                         help="retardo de la salida de audio en segundos")
+    parser.add_argument("--record", default=None, metavar="WAV",
+                        help="graba la salida de audio a un archivo WAV")
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -439,6 +957,7 @@ def main():
     args.blocksize = args.blocksize or audio_cfg.get("blocksize", 512)
     args.delay = args.delay if args.delay is not None else audio_cfg.get(
         "delay", 1.0)
+    args.record = args.record or audio_cfg.get("record") or None
     args.midi = args.midi if args.midi is not None else midi_cfg.get("input", "")
     args.midi_out = (
         args.midi_out if args.midi_out is not None
@@ -448,10 +967,18 @@ def main():
         action: parse_button_spec(spec)
         for action, spec in cfg.get("buttons", {}).items()
     }
-    args.pots = {
-        param: parse_button_spec(spec)
-        for param, spec in cfg.get("pots", {}).items()
-    }
+    args.pots = []
+    for key, entry in cfg.get("pots", {}).items():
+        if isinstance(entry, dict):
+            # potN = { cc = "cc:canal:control", target = "canal:parametro" }
+            spec = parse_button_spec(entry.get("cc", ""))
+            target = parse_pot_target(entry.get("target", ""))
+        else:
+            # formato antiguo: param = "cc:canal:control" (canal via MIDI ch)
+            spec = parse_button_spec(entry)
+            target = (None, key) if spec else None
+        if spec is not None and target is not None:
+            args.pots.append((spec, target))
 
     Player(args).run()
 

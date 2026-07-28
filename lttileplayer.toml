@@ -4,29 +4,33 @@
 songs_dir = "/home/angel/Documentos/canciones/"
 
 [audio]
-output = ""
+output = "IQaudIODAC"
 samplerate = 44100
 blocksize = 512
 delay = 1.0
+record = ""
 
 [midi]
-input = "Minilab3:Minilab3 MIDI 28:0"
-output = "Midi Through:Midi Through Port-0 14:0"
+input = "LPD8"
+output = "Midi Through"
 
 [buttons]
 # Botones del controlador: "note:canal:nota" o "cc:canal:control",
 # "" = sin asignar.
-up = "note:9:37"
+up = "note:9:40"
 down = "note:9:36"
-accept = "note:9:38"
 play = "note:9:41"
-stop = "note:9:40"
+stop = "note:9:37"
 
 [pots]
-# Potenciómetros del controlador: "cc:canal:control",
-# "" = sin asignar.
-# Si todos están vacíos se usa el mapeo CC por defecto (1/7/10/20).
-cutoff = ""
-volume = ""
-pan = ""
-pitch = ""
+# Potenciómetros: cc = "cc:canal:control" (capturado aquí),
+# target = "canal:parametro" (canal LGPT 0-7; parametro:
+# lp_cutoff, lp_res, volume, pan, pitch; "" = sin asignar).
+pot1 = { cc = "cc:0:70", target = "2:lp_cutoff" }
+pot2 = { cc = "cc:0:71", target = "2:volume" }
+pot3 = { cc = "cc:0:72", target = "2:pan" }
+pot4 = { cc = "cc:0:73", target = "2:pitch" }
+pot5 = { cc = "cc:0:74", target = "2:lp_res" }
+pot6 = { cc = "cc:0:75", target = "" }
+pot7 = { cc = "cc:0:76", target = "" }
+pot8 = { cc = "cc:0:77", target = "" }

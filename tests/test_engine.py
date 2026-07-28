@@ -230,6 +230,24 @@ class TestVoices(unittest.TestCase):
             engine.channels[0].cc_pitch, 2.0 ** (63 / 64), places=5)
         self.assertAlmostEqual(voice.base_speed, base)   # no cambia la base
 
+    def test_lp_filter(self):
+        # Con cutoff al mínimo, un seno de 440 Hz debe atenuarse mucho
+        engine = make_engine()
+        note_row(engine.project, 0)
+        engine._process_tick()
+        open_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
+        engine.push_event("param", 0, "lp_cutoff", 0)
+        engine.render(4096)                  # deja asentar el filtro
+        lp_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
+        self.assertGreater(open_rms, 0.01)
+        self.assertLess(lp_rms, open_rms * 0.2)
+        # La resonancia por sí sola no silencia
+        engine.push_event("param", 0, "lp_cutoff", 127)
+        engine.push_event("param", 0, "lp_res", 100)
+        engine.render(4096)
+        res_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
+        self.assertGreater(res_rms, open_rms * 0.3)
+
 
 class TestMidiOut(unittest.TestCase):
     def make_midi_engine(self):

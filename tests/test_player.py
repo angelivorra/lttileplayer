@@ -2,10 +2,12 @@
 """Tests del mapeo de botones MIDI del reproductor."""
 
 import unittest
+from pathlib import Path
 
 import mido
 
-from lgpt_player import match_button, match_pot, parse_button_spec
+from lgpt_player import match_button, match_pot, parse_button_spec, \
+    parse_pot_target
 
 
 class TestParseButtonSpec(unittest.TestCase):
@@ -62,26 +64,75 @@ class TestMatchButton(unittest.TestCase):
 
 class TestMatchPot(unittest.TestCase):
     def setUp(self):
-        self.pots = {
-            "cutoff": parse_button_spec("cc:9:16"),
-            "volume": parse_button_spec("cc:9:17"),
-            "pan": None,
-            "pitch": None,
-        }
+        self.pots = [
+            (parse_button_spec("cc:9:16"), (2, "lp_cutoff")),
+            (parse_button_spec("cc:9:17"), (2, "lp_res")),
+            (parse_button_spec("cc:9:18"), (None, "volume")),  # canal via MIDI
+        ]
 
     def test_pot_match(self):
         msg = mido.Message("control_change", channel=9, control=16, value=80)
-        self.assertEqual(match_pot(self.pots, msg), "cutoff")
+        self.assertEqual(match_pot(self.pots, msg), (2, "lp_cutoff"))
         msg = mido.Message("control_change", channel=9, control=17, value=80)
-        self.assertEqual(match_pot(self.pots, msg), "volume")
+        self.assertEqual(match_pot(self.pots, msg), (2, "lp_res"))
+
+    def test_pot_channel_from_midi(self):
+        msg = mido.Message("control_change", channel=9, control=18, value=80)
+        self.assertEqual(match_pot(self.pots, msg), (9 % 8, "volume"))
 
     def test_pot_no_match(self):
-        msg = mido.Message("control_change", channel=9, control=18, value=80)
+        msg = mido.Message("control_change", channel=9, control=19, value=80)
         self.assertIsNone(match_pot(self.pots, msg))
         msg = mido.Message("control_change", channel=0, control=16, value=80)
         self.assertIsNone(match_pot(self.pots, msg))
         msg = mido.Message("note_on", channel=9, note=16, velocity=100)
         self.assertIsNone(match_pot(self.pots, msg))
+
+
+class TestParsePotTarget(unittest.TestCase):
+    def test_valid(self):
+        self.assertEqual(parse_pot_target("2:lp_cutoff"), (2, "lp_cutoff"))
+        self.assertEqual(parse_pot_target("0:volume"), (0, "volume"))
+
+    def test_invalid(self):
+        self.assertIsNone(parse_pot_target(""))
+        self.assertIsNone(parse_pot_target("8:volume"))   # canal fuera de rango
+        self.assertIsNone(parse_pot_target("2:"))
+        self.assertIsNone(parse_pot_target("x:volume"))
+        self.assertIsNone(parse_pot_target(None))
+
+
+class TestWavRecorder(unittest.TestCase):
+    def test_records_wav(self):
+        import numpy as np
+        import soundfile as sf
+        from lgpt_player import WavRecorder
+        path = "/tmp/lgpt_recorder_test.wav"
+        try:
+            rec = WavRecorder(path, 44100)
+            t = np.arange(4410, dtype=np.float32) / 44100
+            block = np.stack([np.sin(t), np.cos(t)], axis=1)
+            rec.write(block)
+            rec.write(block)
+            rec.close()
+            data, sr = sf.read(path, dtype="float32")
+            self.assertEqual(sr, 44100)
+            self.assertEqual(len(data), 8820)
+            np.testing.assert_allclose(data[:4410, 0], block[:, 0], atol=1e-3)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+
+class TestPython311Compat(unittest.TestCase):
+    """El código debe parsear con la gramática de Python 3.11 (la Pi)."""
+
+    def test_sources_parse_as_311(self):
+        import ast
+        root = Path(__file__).resolve().parent.parent
+        for name in ("lgpt_engine.py", "lgpt_parser.py",
+                     "lgpt_player.py", "lgpt_setup.py"):
+            src = (root / name).read_text()
+            ast.parse(src, filename=name, feature_version=(3, 11))
 
 
 if __name__ == "__main__":

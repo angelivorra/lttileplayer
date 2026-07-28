@@ -561,6 +561,7 @@ class Channel:
         "cc_vol", "cc_pan", "cc_pitch", "cc_cutoff",
         "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
         "groove", "g_pos", "g_ticks",
+        "lp_cutoff", "lp_res", "lp_coef", "lp_state",
     )
 
     def __init__(self, idx: int):
@@ -592,6 +593,12 @@ class Channel:
         self.groove = 0                        # groove seleccionado (GROV)
         self.g_pos = 0                         # paso dentro del groove
         self.g_ticks = 6                       # cuenta atrás de ticks del paso
+        # Filtro LP con resonancia del canal (efecto live, no del upstream)
+        self.lp_cutoff = 1.0                   # 0-1 (1 = abierto)
+        self.lp_res = 0.0                      # 0-1
+        self.lp_coef: Optional[tuple] = None   # (b0,b1,b2,a1,a2)
+        self.lp_state = [0.0, 0.0, 0.0, 0.0,   # x1,x2,y1,y2 (L)
+                         0.0, 0.0, 0.0, 0.0]   # x1,x2,y1,y2 (R)
 
 
 # --------------------------------------------------------------------------
@@ -653,6 +660,7 @@ class Engine:
         self.finished = False           # True al recibir STOP
         self.events: queue.SimpleQueue = queue.SimpleQueue()
         self.unsupported_cmds: set[str] = set()
+        self._ch_bufs: dict[int, np.ndarray] = {}   # buffers por canal (filtro)
         # Delay de audio (segundos): el secuenciador y los eventos MIDI van
         # en tiempo real; solo la salida de audio se retrasa.
         self._delay_buf: Optional[np.ndarray] = None
@@ -719,6 +727,20 @@ class Engine:
         self._drain_events()
         out = np.zeros((frames, 2), dtype=np.float32)
         if self.playing:
+            # Canales con filtro LP activo: renderizan a un buffer propio
+            # y se filtran al final del bloque
+            fmap: dict[int, np.ndarray] = {}
+            for ch in self.channels:
+                v = ch.voice
+                if v is not None and v.active and self._lp_active(ch):
+                    buf = self._ch_bufs.get(ch.idx)
+                    if buf is None or len(buf) < frames:
+                        buf = np.zeros((max(frames, 1024), 2),
+                                       dtype=np.float32)
+                        self._ch_bufs[ch.idx] = buf
+                    else:
+                        buf[:frames] = 0.0
+                    fmap[ch.idx] = buf
             off = 0
             while off < frames and self.playing:
                 n = min(frames - off, int(self.tick_phase))
@@ -731,7 +753,7 @@ class Engine:
                                 v.cc_pan = ch.cc_pan
                                 v.cc_pitch = ch.cc_pitch
                                 v.cc_cutoff = ch.cc_cutoff
-                                v.render(out, off, n)
+                                v.render(fmap.get(ch.idx, out), off, n)
                             if not v.active:
                                 ch.voice = None
                     off += n
@@ -740,9 +762,49 @@ class Engine:
                     frac = self.tick_phase    # resto fraccionario ya consumido
                     self._process_tick()
                     self.tick_phase = self.samples_per_tick + frac
+            for ci, buf in fmap.items():
+                ch = self.channels[ci]
+                block = buf[:frames]
+                self._render_lp(ch, block)
+                out += block
             out *= self.master
             np.clip(out, -1.0, 1.0, out=out)
         return self._apply_delay(out)
+
+    def _lp_active(self, ch: Channel) -> bool:
+        return ch.lp_cutoff < 0.999 or ch.lp_res > 0.001
+
+    def _render_lp(self, ch: Channel, buf: np.ndarray):
+        """Biquad LP (RBJ cookbook) con cutoff log 40Hz-16kHz y Q 0.5-10."""
+        cut, res = ch.lp_cutoff, ch.lp_res
+        if ch.lp_coef is None or ch.lp_coef[0] != cut or ch.lp_coef[1] != res:
+            freq = min(40.0 * (400.0 ** cut), self.sr * 0.45)
+            q = 0.5 + res * 9.5
+            w0 = 2.0 * math.pi * freq / self.sr
+            alpha = math.sin(w0) / (2.0 * q)
+            cosw = math.cos(w0)
+            a0 = 1.0 + alpha
+            b0 = (1.0 - cosw) * 0.5 / a0
+            b1 = (1.0 - cosw) / a0
+            a1 = -2.0 * cosw / a0
+            a2 = (1.0 - alpha) / a0
+            ch.lp_coef = (cut, res, b0, b1, b0, a1, a2)
+        _c, _r, b0, b1, b2, a1, a2 = ch.lp_coef
+        st = ch.lp_state
+        for side in range(2):
+            x1, x2, y1, y2 = st[side * 4:side * 4 + 4]
+            xs = buf[:, side]
+            for i in range(len(xs)):
+                x = xs[i]
+                y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+                x2, x1 = x1, x
+                y2, y1 = y1, y
+                if y > 4.0:
+                    y = 4.0
+                elif y < -4.0:
+                    y = -4.0
+                xs[i] = y
+            st[side * 4:side * 4 + 4] = [x1, x2, y1, y2]
 
     def _apply_delay(self, out: np.ndarray) -> np.ndarray:
         """Línea de retardo circular sobre la salida (en pausa también
@@ -821,6 +883,10 @@ class Engine:
             ch.cc_pitch = 2.0 ** ((val - 64) / 64.0)
         elif name == "cutoff":
             ch.cc_cutoff = val / 127.0
+        elif name == "lp_cutoff":
+            ch.lp_cutoff = val / 127.0
+        elif name == "lp_res":
+            ch.lp_res = val / 127.0
 
     # -- núcleo del secuenciador (Player::Trigger del upstream) ----------------
 

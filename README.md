@@ -1,24 +1,29 @@
-# lttileplayer
+# ROBOTRACA (lttileplayer)
 
 Reproductor standalone de canciones de [LittleGPTracker](https://github.com/djdiskmachine/LittleGPTracker)
 (LGPT / Little Piggy Tracker) para consola, pensado para una **Raspberry Pi 4
-con HAT de audio** (Raspberry Pi OS Lite, headless), con modulación en
-directo vía **MIDI CC** sobre cada uno de los 8 canales.
+con HAT de audio** (Raspberry Pi OS Lite, arranque kiosk en HDMI), con
+modulación en directo vía **MIDI CC** sobre cada uno de los 8 canales.
+Estética Pip-Boy: consola verde fósforo, título ROBOTRACA y lista de
+canciones a lo grande.
 
 El motor replica el comportamiento del reproductor original (secuenciador
-song → chain → phrase, 6 ticks por step sample-accurate, rampas k-rate,
-pan law original) limitándose a lo que usan las canciones del proyecto.
+song → chain → phrase, 6 ticks por step sample-accurate, grooves por canal,
+rampas k-rate, pan law original) limitándose a lo que usan las canciones
+del proyecto.
 
 ## Archivos
 
-- `lttileplayer.toml` — configuración: carpeta de canciones, dispositivo
-  de salida de audio, puertos MIDI de entrada y salida, botones.
-- `lgpt_setup.py` — asistente de configuración (terminal/SSH).
+- `lttileplayer.toml` — configuración fijada del sistema (audio, MIDI,
+  botones, pots, delay).
+- `deploy.sh` — despliegue completo a la Pi (código, canciones, venv,
+  config, arranque kiosk).
+- `lgpt_setup.py` — asistente de configuración por terminal (opcional).
 - `lgpt_parser.py` — parser de `lgptsav.dat` (XML plano o comprimido LZ77).
 - `lgpt_engine.py` — motor de audio puro (numpy): voces, secuenciador,
   mixer. Sin dependencia de tarjeta de audio (testable headless).
-- `lgpt_player.py` — reproductor de consola: lista de canciones, salida de
-  audio con `sounddevice`, entrada/salida MIDI con `mido`/`python-rtmidi`.
+- `lgpt_player.py` — reproductor: UI curses retro (estética Pip-Boy),
+  salida de audio con `sounddevice`, entrada/salida MIDI.
 - `tests/` — tests headless (unittest/pytest).
 
 ## Dependencias
@@ -32,72 +37,55 @@ python3 -m venv .venv
 
 ## Configuración
 
-Asistente interactivo (terminal, funciona también por SSH):
+La configuración está fijada en `lttileplayer.toml` (incluida en el repo):
 
-```sh
-.venv/bin/python lgpt_setup.py
-```
-
-Pregunta la carpeta de canciones, la salida de audio (lista numerada de
-dispositivos), el delay del audio, la salida MIDI, la entrada MIDI, luego
-pide pulsar cada botón del controlador (**arriba, abajo, aceptar, play,
-stop**, captura note on o CC) y por último los 4 potenciómetros
-(**cutoff, volumen, pan, pitch**, captura el primer CC que se mueva).
-En los menús, pulsar **enter** conserva el valor guardado en el sistema
-(si no hay valor previo: carpeta `/home/angel/Documentos/canciones/` y
-delay de 1 segundo); en las capturas, enter deja el botón/pot sin asignar.
-El resultado se guarda en `lttileplayer.toml`:
-
-```toml
-songs_dir = "/home/angel/Documentos/canciones/"   # proyectos lgpt_*
-
-[audio]
-output = ""          # salida de audio (nombre/índice PortAudio; "" = defecto)
-samplerate = 44100
-blocksize = 512
-delay = 1.0          # retardo del audio en segundos (típico 0.5-1.0)
-
-[midi]
-input = ""           # entrada MIDI CC ("" = primera disponible, "off" = no)
-output = "virtual"   # salida MIDI de eventos LGPT ("virtual" = puerto ALSA
-                     # nuevo 'lttileplayer'; nombre parcial; "" = desactivada)
-
-[buttons]            # "note:canal:nota" o "cc:canal:control"; "" = sin asignar
-up = "note:0:36"
-down = "note:0:37"
-accept = "note:0:38"
-play = "cc:0:41"
-stop = "cc:0:42"
-
-[pots]               # "cc:canal:control"; "" = sin asignar
-cutoff = "cc:0:16"   # si todos vacíos: mapeo por defecto CC1/7/10/20
-volume = "cc:0:17"
-pan = "cc:0:18"
-pitch = "cc:0:19"
-```
+- `songs_dir`: carpeta de canciones.
+- `[audio]`: salida (HAT), samplerate, blocksize, `delay` (retardo del
+  audio en segundos), `record` (WAV de salida, vacío = no grabar).
+- `[midi]`: entrada del controlador (nombre parcial, sin el nº de cliente
+  ALSA que cambia entre arranques) y salida de eventos LGPT.
+- `[buttons]`: 4 botones del controlador (up/down/play/stop) como
+  `note:canal:nota` o `cc:canal:control`.
+- `[pots]`: 8 potenciómetros `potN = { cc = "cc:canal:control",
+  target = "canal:parametro" }` con `parametro` ∈ `lp_cutoff`, `lp_res`,
+  `volume`, `pan`, `pitch`.
 
 Los argumentos de línea de comandos (`--songs`, `--device`, `--midi`,
-`--midi-out`, `--samplerate`, `--blocksize`, `--delay`, `--config`)
-tienen prioridad sobre el archivo.
+`--midi-out`, `--samplerate`, `--blocksize`, `--delay`, `--record`,
+`--config`) tienen prioridad sobre el archivo. Si algún día hace falta
+reconfigurar, hay un asistente por terminal: `.venv/bin/python lgpt_setup.py`.
 
 ## Uso
 
 ```sh
-.venv/bin/python lgpt_player.py
+.venv/bin/python lgpt_player.py [--record salida.wav]
 ```
 
-Teclas y botones MIDI asignados:
+`--record` (o `record = "ruta.wav"` en `[audio]`) graba a WAV exactamente
+lo que sale por el stream (incluye el delay configurado), sin bloquear
+el callback de audio.
 
-- Lista: `↑`/`↓` (o botones **arriba**/**abajo**) para moverse,
-  `enter` (o **aceptar**/**play**) reproduce, `q` sale.
-- Reproducción: `espacio` (o **play**/**aceptar**) play/pausa,
-  `n`/`p` (o **abajo**/**arriba**) siguiente/anterior,
-  `q` (o **stop**) vuelve a la lista.
+Controles (botones MIDI o teclado):
 
-Modulación en directo con los pots configurados (canal MIDI 1-8 → canal
-tracker 0-7): cutoff, volumen, pan y pitch (±1 octava, centro en 64).
-Si no hay pots configurados se usan CC1=cutoff, CC7=volumen, CC10=pan
-y CC20=pitch.
+- Lista: **arriba/abajo** para moverse (scroll infinito, 3 canciones),
+  **play** reproduce, **stop** abre la pantalla de captura de botones/pots.
+- Reproducción: **play** = play/pausa, **arriba/abajo** =
+  anterior/siguiente canción, **stop** = volver a la lista.
+
+Modulación en directo con los pots configurados. Cada pot tiene un
+`target = canal:parametro` donde el canal es 0-7 (0 = columna 1) y el
+parámetro puede ser:
+
+| Parámetro   | Efecto                                             |
+|-------------|----------------------------------------------------|
+| `lp_cutoff` | Filtro low-pass del canal (barrido 40 Hz - 16 kHz) |
+| `lp_res`    | Resonancia del low-pass (Q 0.5 - 10, efecto acid)  |
+| `volume`    | Volumen del canal                                  |
+| `pan`       | Pan del canal                                      |
+| `pitch`     | Pitch del canal (±1 octava, centro en 64)          |
+
+Si no hay pots configurados se usa el mapeo por defecto CC1=cutoff,
+CC7=volumen, CC10=pan, CC20=pitch (canal MIDI 1-8 → canal tracker 0-7).
 
 Salida MIDI: todos los eventos MIDI que genera LGPT salen por el puerto
 configurado para que los recoja otro programa o sintetizador:
@@ -112,6 +100,28 @@ Los eventos MIDI salen **en tiempo real**, al compás del secuenciador.
 Si se configura `[audio] delay` (o `--delay`), solo el audio se retrasa:
 útil cuando otro programa recibe el MIDI por red y suena con latencia —
 el audio local se retrasa lo mismo para mantenerse sincronizado.
+
+## Despliegue en la Raspberry Pi
+
+```sh
+./deploy.sh [host_ssh]     # por defecto "Lgpt"
+```
+
+El script (idempotente) sincroniza el código a `/home/angel/lttileplayer`,
+copia las canciones a `/home/angel/Documentos/canciones`, crea el venv,
+escribe la config para la Pi (salida = HAT de audio, entrada MIDI,
+salida MIDI = puerto virtual `lttileplayer`) y deja el arranque
+configurado: **autologin en tty1** con el player a pantalla completa
+(kiosk: si el proceso termina, agetty lo relanza). Desactiva el antiguo
+`lgpt.service`/`rc.local` y conecta la salida MIDI a `movida:in` si el
+bridge TCP-MIDI está presente.
+
+La UI se ve en la pantalla HDMI de la Pi y se controla con los botones
+MIDI (el teclado de la consola también funciona). Para capturar
+pots/botones en la Pi, ejecuta allí el asistente por SSH:
+`/home/angel/lttileplayer/.venv/bin/python /home/angel/lttileplayer/lgpt_setup.py`
+(escribe el mismo `lttileplayer.toml`; reinicia el player después con
+Ctrl+Alt+Supr o `sudo pkill -f lgpt_player`).
 
 ## Tests y benchmark
 
@@ -136,6 +146,8 @@ Sartenazo v1):
 - Crush/downsample y filtro LP del upstream (ver limitaciones).
 - Instrumentos MIDI: note on/off, `MDCC`, `MDPG`, `MVEL` y `VOLM` → CC7,
   emitidos por el puerto MIDI de salida configurado.
+- Filtro low-pass con resonancia por canal (biquad propio, sin plugins
+  LADSPA: no añade dependencias y sobra para 8 canales en la RPi4).
 
 ## Limitaciones conocidas
 

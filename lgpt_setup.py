@@ -25,17 +25,20 @@ DEFAULT_DELAY = 1.0
 BUTTON_ACTIONS = [
     ("up", "ARRIBA (anterior en la lista)"),
     ("down", "ABAJO (siguiente en la lista)"),
-    ("accept", "ACEPTAR (seleccionar)"),
     ("play", "PLAY (reproducir / pausa)"),
     ("stop", "STOP (parar / volver a la lista)"),
 ]
 
-POT_ACTIONS = [
-    ("cutoff", "POTENCIÓMETRO de CUTOFF (filtro)"),
-    ("volume", "POTENCIÓMETRO de VOLUMEN"),
-    ("pan", "POTENCIÓMETRO de PAN"),
-    ("pitch", "POTENCIÓMETRO de PITCH"),
-]
+POT_COUNT = 8
+# Targets por defecto de cada pot ("canal:parametro"; canal 2 = columna 3,
+# el bajo en abduccion). Editables a mano en el TOML.
+POT_DEFAULT_TARGETS = {
+    1: "2:lp_cutoff",
+    2: "2:volume",
+    3: "2:pan",
+    4: "2:pitch",
+    5: "2:lp_res",
+}
 
 
 def load_existing() -> dict:
@@ -169,6 +172,22 @@ def _drain_midi(port):
         pass
 
 
+def wait_quiet(port, seconds: float = 0.6):
+    """Espera a que dejen de llegar eventos MIDI (el pot se ha soltado)."""
+    quiet_since = None
+    while True:
+        got = False
+        for _msg in port.iter_pending():
+            got = True
+        if got:
+            quiet_since = None
+        elif quiet_since is None:
+            quiet_since = time.time()
+        elif time.time() - quiet_since >= seconds:
+            return
+        time.sleep(0.05)
+
+
 def capture_button(port, label: str, current: str) -> str:
     """Espera un evento MIDI (note on o CC) y lo devuelve como spec.
 
@@ -200,7 +219,7 @@ def capture_button(port, label: str, current: str) -> str:
             return spec
 
 
-def write_config(cfg: dict):
+def write_config(cfg: dict, path: Path = CONFIG_PATH):
     audio = cfg["audio"]
     midi = cfg["midi"]
     buttons = cfg["buttons"]
@@ -216,6 +235,7 @@ def write_config(cfg: dict):
         f'samplerate = {audio["samplerate"]}',
         f'blocksize = {audio["blocksize"]}',
         f'delay = {audio["delay"]}',
+        f'record = "{audio.get("record", "")}"',
         "",
         "[midi]",
         f'input = "{midi["input"]}"',
@@ -230,13 +250,17 @@ def write_config(cfg: dict):
     lines += [
         "",
         "[pots]",
-        '# Potenciómetros del controlador: "cc:canal:control",',
-        '# "" = sin asignar.',
+        '# Potenciómetros: cc = "cc:canal:control" (capturado aquí),',
+        '# target = "canal:parametro" (canal LGPT 0-7; parametro:',
+        '# lp_cutoff, lp_res, volume, pan, pitch; "" = sin asignar).',
     ]
-    for param, _label in POT_ACTIONS:
-        lines.append(f'{param} = "{pots.get(param, "")}"')
-    CONFIG_PATH.write_text("\n".join(lines) + "\n")
-    print(f"\nConfiguración guardada en {CONFIG_PATH}")
+    for n in range(1, POT_COUNT + 1):
+        entry = pots.get(f"pot{n}", {})
+        cc = entry.get("cc", "")
+        target = entry.get("target", "")
+        lines.append(f'pot{n} = {{ cc = "{cc}", target = "{target}" }}')
+    path.write_text("\n".join(lines) + "\n")
+    print(f"\nConfiguración guardada en {path}")
 
 
 def main():
@@ -269,13 +293,22 @@ def main():
                 buttons[action] = capture_button(
                     port, label, buttons.get(action, ""))
             print("\n--- Captura de potenciómetros ---")
-            for param, label in POT_ACTIONS:
-                pots[param] = capture_button(
-                    port, label, pots.get(param, ""))
+            print("Gira cada pot y suéltalo: espero a que pare el flujo "
+                  "MIDI antes de pedir el siguiente.")
+            for n in range(1, POT_COUNT + 1):
+                key = f"pot{n}"
+                entry = pots.get(key, {})
+                if not isinstance(entry, dict):
+                    entry = {}
+                target = entry.get("target") or POT_DEFAULT_TARGETS.get(n, "")
+                label = f"POTENCIÓMETRO {n} ({target or 'libre'})"
+                spec = capture_button(port, label, entry.get("cc", ""))
+                wait_quiet(port)
+                pots[key] = {"cc": spec, "target": target}
     else:
         print("\nSin entrada MIDI: botones y pots sin asignar.")
         buttons = {action: "" for action, _ in BUTTON_ACTIONS}
-        pots = {param: "" for param, _ in POT_ACTIONS}
+        pots = {}
 
     write_config({
         "songs_dir": songs_dir,
@@ -284,6 +317,7 @@ def main():
             "samplerate": audio.get("samplerate", 44100),
             "blocksize": audio.get("blocksize", 512),
             "delay": audio["delay"],
+            "record": audio.get("record", ""),
         },
         "midi": midi,
         "buttons": buttons,
