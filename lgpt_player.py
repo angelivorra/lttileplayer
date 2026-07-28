@@ -134,9 +134,16 @@ class TcpStreamer:
     def write(self, block: np.ndarray):
         if self._client is None:
             return
-        if self._queued > 200:                    # ~2.3 s de cola: descartar
-            self.dropped += 1
-            return
+        # cola acotada (~0.37 s): si se llena, descartamos lo MÁS VIEJO
+        # para que el stream se mantenga en directo tras tirones de red
+        while self._queued >= 32:
+            try:
+                self._queue.get_nowait()
+                self.dropped += 1
+                self._queued -= 1
+            except queue.Empty:
+                self._queued = 0
+                break
         pcm = (np.clip(block, -1.0, 1.0) * 32767).astype(np.int16)
         self._queue.put(pcm.tobytes())
         self._queued += 1
