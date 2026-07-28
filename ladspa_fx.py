@@ -288,6 +288,51 @@ class LadspaStereoFoldover:
         buf *= 1.0 / (1.0 + self._drive)
 
 
+DIVIDER_PATH = "/usr/lib/ladspa/divider_1186.so"
+DIVIDER_ID = 1186
+
+# Puertos del Audio Divider (suboctava)
+DIV_DENOM = 0           # 1-8 entero
+DIV_INPUT = 1
+DIV_OUTPUT = 2
+
+
+class LadspaDivider(LadspaPlugin):
+    """Audio Divider (swh): generador de suboctava para bajos.
+
+    denominator 1 = casi limpio; 2-4 añade la octava inferior."""
+
+    def __init__(self, sample_rate: int, path: str = DIVIDER_PATH):
+        super().__init__(path, DIVIDER_ID, sample_rate)
+
+    def set(self, denominator: float):
+        self.set_control(DIV_DENOM,
+                         float(int(round(min(max(denominator, 1.0), 8.0)))))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, DIV_INPUT, DIV_OUTPUT)
+
+
+class LadspaStereoDivider:
+    """Dos instancias mono para el buffer estéreo del canal."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaDivider(sample_rate)
+        self.right = LadspaDivider(sample_rate)
+
+    def set(self, denominator: float):
+        self.left.set(denominator)
+        self.right.set(denominator)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100

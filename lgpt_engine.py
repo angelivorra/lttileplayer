@@ -817,18 +817,18 @@ class Engine:
         return ch.lp_cutoff > 0.001
 
     def _render_drive(self, ch: Channel, buf: np.ndarray):
-        """Distorsión del canal (Foldover LADSPA; fallback tanh).
-        drive 0 = limpio (bypass)."""
+        """Efecto del canal (Audio Divider: suboctava; fallback tanh).
+        drive 0 = bypass; al subir, denominador 1 -> 4."""
         if ch.drive <= 0.001:
             return
         if ch.drive_ladspa is None:
             try:
-                from ladspa_fx import LadspaStereoFoldover
-                ch.drive_ladspa = LadspaStereoFoldover(self.sr)
+                from ladspa_fx import LadspaStereoDivider
+                ch.drive_ladspa = LadspaStereoDivider(self.sr)
             except Exception:
                 ch.drive_ladspa = False
         if ch.drive_ladspa:
-            ch.drive_ladspa.set(ch.drive)
+            ch.drive_ladspa.set(1.0 + ch.drive * 3.0)
             ch.drive_ladspa.run(buf)
         else:
             k = 1.0 + 20.0 * ch.drive
@@ -839,11 +839,12 @@ class Engine:
 
         Mapeo con regla 0 = bypass: lp_cutoff es la CANTIDAD de efecto —
         a 0 el filtro está abierto (3800 Hz, bypass) y al subir cierra
-        hacia 80 Hz con la resonancia subiendo hasta 0.85."""
+        hacia 160 Hz (suficiente para no apagar el bajo) con la
+        resonancia subiendo hasta 0.85."""
         cut = ch.lp_cutoff
         if cut <= 0.001:
             return
-        freq = 3800.0 * (80.0 / 3800.0) ** cut     # 3800 Hz -> 80 Hz
+        freq = 3800.0 * (160.0 / 3800.0) ** cut    # 3800 Hz -> 160 Hz
         res = 0.85 * cut
         if ch.lp_ladspa is None:
             # Preferencia: C* AutoFilter (acid) > SVF > biquad propio
