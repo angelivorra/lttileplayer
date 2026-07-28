@@ -631,7 +631,8 @@ class AcidLpFx:
 
 
 class SatanFx:
-    """Barry's Satan Maximiser: knee 0 -> -60 dB (destrucción progresiva)."""
+    """Barry's Satan Maximiser: knee 0 -> -60 dB (destrucción progresiva)
+    con compensación de nivel para no disparar el volumen."""
 
     KNEE_MAX = -60.0
 
@@ -648,6 +649,7 @@ class SatanFx:
             self.plugin.run(buf)
         else:
             np.tanh(buf * (1.0 + 30.0 * amount), out=buf)
+        buf *= 1.0 / (1.0 + 2.0 * amount)
 
 
 # Presets disponibles para los pots (target = "canal:nombre"). El orden
