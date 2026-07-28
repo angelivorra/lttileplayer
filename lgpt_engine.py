@@ -817,18 +817,18 @@ class Engine:
         return ch.lp_cutoff > 0.001
 
     def _render_drive(self, ch: Channel, buf: np.ndarray):
-        """Overdrive del canal (Fast overdrive LADSPA; fallback tanh).
+        """Distorsión del canal (Foldover LADSPA; fallback tanh).
         drive 0 = limpio (bypass)."""
         if ch.drive <= 0.001:
             return
         if ch.drive_ladspa is None:
             try:
-                from ladspa_fx import LadspaStereoOverdrive
-                ch.drive_ladspa = LadspaStereoOverdrive(self.sr)
+                from ladspa_fx import LadspaStereoFoldover
+                ch.drive_ladspa = LadspaStereoFoldover(self.sr)
             except Exception:
                 ch.drive_ladspa = False
         if ch.drive_ladspa:
-            ch.drive_ladspa.set(1.0 + 2.0 * ch.drive)
+            ch.drive_ladspa.set(ch.drive)
             ch.drive_ladspa.run(buf)
         else:
             k = 1.0 + 20.0 * ch.drive

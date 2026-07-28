@@ -238,6 +238,56 @@ class LadspaStereoOverdrive:
         buf[:, 1] = right
 
 
+FOLDOVER_PATH = "/usr/lib/ladspa/foldover_1213.so"
+FOLDOVER_ID = 1213
+
+# Puertos del Foldover distortion
+FO_DRIVE = 0            # 0-1
+FO_SKEW = 1             # 0-1 (lo dejamos a 0: drive 0 = limpio)
+FO_INPUT = 2
+FO_OUTPUT = 3
+
+
+class LadspaFoldover(LadspaPlugin):
+    """Foldover distortion (swh): wavefolding, muy audible en bajos.
+
+    skew = 0: drive 0 pasa limpio; al subir drive crece el contenido
+    armónico progresivamente."""
+
+    def __init__(self, sample_rate: int, path: str = FOLDOVER_PATH):
+        super().__init__(path, FOLDOVER_ID, sample_rate)
+        self.set_control(FO_SKEW, 0.0)
+
+    def set(self, drive: float):
+        self.set_control(FO_DRIVE, min(max(drive, 0.0), 1.0))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, FO_INPUT, FO_OUTPUT)
+
+
+class LadspaStereoFoldover:
+    """Dos instancias mono + compensación de nivel (1/(1+drive))."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaFoldover(sample_rate)
+        self.right = LadspaFoldover(sample_rate)
+        self._drive = 0.0
+
+    def set(self, drive: float):
+        self._drive = min(max(drive, 0.0), 1.0)
+        self.left.set(self._drive)
+        self.right.set(self._drive)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
+        buf *= 1.0 / (1.0 + self._drive)
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100
