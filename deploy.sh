@@ -27,7 +27,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "==> 1/7 Código -> $PI:$APP"
 ssh "$PI" "mkdir -p '$APP' '$SONGS_DST'"
 rsync -a --delete \
-    --include='lgpt_*.py' --include='lttileplayer.toml' --include='README.md' \
+    --include='lgpt_*.py' --include='ladspa_fx.py' \
+    --include='lttileplayer.toml' --include='README.md' \
     --include='tests/' --include='tests/**' --exclude='*' \
     "$HERE/" "$PI:$APP/"
 
