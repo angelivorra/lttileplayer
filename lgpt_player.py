@@ -397,6 +397,7 @@ class Player:
             old.panic()                   # note off de notas MIDI colgadas
         engine = Engine(project_dir, sample_rate=self.args.samplerate,
                         audio_delay=self.args.delay)
+        engine.muted = set(self.args.mute)
         engine.midi_out = self.midi_out
         engine.start()
         self.engine_ref["engine"] = engine   # swap atómico de referencia
@@ -503,7 +504,9 @@ class Player:
             else:
                 scr.addstr(y, 1, f"{ch.idx + 1} --- --",
                            curses.color_pair(3))
-                if ch.playing:
+                if ch.idx in engine.muted:
+                    scr.addstr(y, 10, "MUTE", curses.color_pair(5))
+                elif ch.playing:
                     scr.addstr(y, 10, "·", curses.color_pair(3))
         scr.addstr(h - 1, 1, "espacio: pausa  n/p: canción  q: lista"[:w - 2],
                    curses.color_pair(3))
@@ -967,6 +970,7 @@ def main():
         action: parse_button_spec(spec)
         for action, spec in cfg.get("buttons", {}).items()
     }
+    args.mute = cfg.get("channels", {}).get("mute", [])
     args.pots = []
     for key, entry in cfg.get("pots", {}).items():
         if isinstance(entry, dict):

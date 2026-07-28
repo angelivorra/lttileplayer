@@ -14,6 +14,10 @@ record = ""
 input = "LPD8"
 output = "Midi Through"
 
+[channels]
+# Canales silenciados siempre (índice 0-7; 3 = pista 4).
+mute = [3]
+
 [buttons]
 # Botones del controlador: "note:canal:nota" o "cc:canal:control",
 # "" = sin asignar.

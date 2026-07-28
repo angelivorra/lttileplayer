@@ -248,6 +248,16 @@ class TestVoices(unittest.TestCase):
         res_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
         self.assertGreater(res_rms, open_rms * 0.3)
 
+    def test_muted_channel(self):
+        engine = make_engine()
+        engine.muted = {0}
+        note_row(engine.project, 0)
+        engine._process_tick()
+        out = engine.render(512)
+        self.assertEqual(float(np.abs(out).max()), 0.0)
+        # el secuenciador sigue vivo aunque el canal esté muteado
+        self.assertIsNotNone(engine.channels[0].voice)
+
 
 class TestMidiOut(unittest.TestCase):
     def make_midi_engine(self):

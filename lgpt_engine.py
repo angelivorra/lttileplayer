@@ -662,6 +662,7 @@ class Engine:
         self.events: queue.SimpleQueue = queue.SimpleQueue()
         self.unsupported_cmds: set[str] = set()
         self._ch_bufs: dict[int, np.ndarray] = {}   # buffers por canal (filtro)
+        self.muted: set[int] = set()    # canales silenciados (índice 0-7)
         # Delay de audio (segundos): el secuenciador y los eventos MIDI van
         # en tiempo real; solo la salida de audio se retrasa.
         self._delay_buf: Optional[np.ndarray] = None
@@ -732,6 +733,8 @@ class Engine:
             # y se filtran al final del bloque
             fmap: dict[int, np.ndarray] = {}
             for ch in self.channels:
+                if ch.idx in self.muted:
+                    continue
                 v = ch.voice
                 if v is not None and v.active and self._lp_active(ch):
                     buf = self._ch_bufs.get(ch.idx)
@@ -747,6 +750,8 @@ class Engine:
                 n = min(frames - off, int(self.tick_phase))
                 if n > 0:
                     for ch in self.channels:
+                        if ch.idx in self.muted:
+                            continue
                         v = ch.voice
                         if v is not None:
                             if v.active:
@@ -777,9 +782,13 @@ class Engine:
 
     def _render_lp(self, ch: Channel, buf: np.ndarray):
         """Filtro LP del canal: LADSPA SVF si está disponible (Raspberry
-        Pi con swh-plugins); si no, biquad RBJ propio."""
+        Pi con swh-plugins); si no, biquad RBJ propio.
+
+        Mapeo pensado para bajo: cutoff 80 Hz - 6 kHz (nunca se cierra
+        del todo) y resonancia 0.1 - 0.95 (siempre con carácter)."""
         cut = ch.lp_cutoff
-        freq = min(40.0 * (400.0 ** cut), self.sr * 0.45)
+        freq = 80.0 * (75.0 ** cut)              # 80 Hz .. 6 kHz
+        res = 0.1 + 0.85 * ch.lp_res
         if ch.lp_ladspa is None:
             try:
                 from ladspa_fx import LadspaStereoSVF
@@ -787,10 +796,9 @@ class Engine:
             except Exception:
                 ch.lp_ladspa = False        # sin plugin: biquad propio
         if ch.lp_ladspa:
-            ch.lp_ladspa.set(freq_hz=freq, res=ch.lp_res)
+            ch.lp_ladspa.set(freq_hz=freq, res=res)
             ch.lp_ladspa.run(buf)
             return
-        res = ch.lp_res
         if ch.lp_coef is None or ch.lp_coef[0] != cut or ch.lp_coef[1] != res:
             q = 0.5 + res * 9.5
             w0 = 2.0 * math.pi * freq / self.sr
