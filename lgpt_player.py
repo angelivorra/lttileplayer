@@ -325,6 +325,28 @@ def big_text(scr, y: int, x: int, text: str, scale: int, attr):
                                "█" * scale, attr)
 
 
+def big_text_half(scr, y: int, x: int, text: str, attr):
+    """Dibuja `text` con la microfuente 3x5 usando medio-bloques (▀ ▄ █):
+    cada celda empaqueta 2 píxeles verticales, así que el texto queda más
+    suave y compacto (3 filas de celda en vez de 5)."""
+    for i, ch in enumerate(text):
+        glyph = FONT3X5.get(ch, FONT3X5[" "])
+        for pair in range(3):
+            top = glyph[pair * 2]
+            bottom = glyph[pair * 2 + 1] if pair * 2 + 1 < 5 else "   "
+            for c in range(3):
+                t, b = top[c] != " ", bottom[c] != " "
+                if t and b:
+                    cell = "█"
+                elif t:
+                    cell = "▀"
+                elif b:
+                    cell = "▄"
+                else:
+                    continue
+                scr.addstr(y + pair, x + i * 4 + c, cell, attr)
+
+
 def display_name(dirname: str) -> str:
     """Nombre de canción para la lista: sin 'lgpt_', corto y en mayúsculas."""
     name = dirname
@@ -425,8 +447,8 @@ class Player:
                 return
 
     def _draw_list(self, scr, curses):
-        """ROBOTRACA pequeño + 3 canciones centradas (scroll infinito);
-        la seleccionada al doble de tamaño. Estética Pip-Boy."""
+        """ROBOTRACA a texto de consola + 3 canciones centradas (scroll
+        infinito): prev/next con medio-bloques, seleccionada al doble."""
         scr.erase()
         h, w = scr.getmaxyx()
         names = [display_name(p.name) for p in self.projects]
@@ -435,24 +457,21 @@ class Player:
         current = names[self.index]
         nxt = names[(self.index + 1) % n]
         sel_scale = 2 if len(current) * 8 <= w else 1
-        # bloque: título (5 filas) + regla + prev + seleccionada + next
-        total_rows = 5 + 2 + 1 + 5 * sel_scale + 1
+        # bloque: título (1) + hueco + prev (3) + seleccionada + next (3)
+        total_rows = 2 + 3 + 5 * sel_scale + 1 + 3
         y0 = max(0, (h - total_rows) // 2)
-        x_title = max(0, (w - 9 * 4) // 2)
-        big_text(scr, y0, x_title, "ROBOTRACA", 1, self._pair_bright)
-        y = y0 + 5
-        rule_w = min(w - 4, 9 * 4 + 8)
-        scr.addstr(y, max(0, (w - rule_w) // 2), "─" * rule_w,
-                   self._pair_dim)
-        y += 2
-        scr.addstr(y, max(0, (w - len(prev)) // 2), prev,
-                   self._pair_dim)
-        y += 1
+        title = "R O B O T R A C A"
+        scr.addstr(y0, max(0, (w - len(title)) // 2), title,
+                   self._pair_bright)
+        y = y0 + 2
+        big_text_half(scr, y, max(0, (w - len(prev) * 4) // 2), prev,
+                      self._pair_dim)
+        y += 3 + 1
         big_text(scr, y, max(0, (w - len(current) * 4 * sel_scale) // 2),
                  current, sel_scale, self._pair_sel)
         y += 5 * sel_scale + 1
-        scr.addstr(y, max(0, (w - len(nxt)) // 2), nxt,
-                   self._pair_dim)
+        big_text_half(scr, y, max(0, (w - len(nxt) * 4) // 2), nxt,
+                      self._pair_dim)
         scr.refresh()
 
     def _draw_song(self, scr, curses, engine: Engine):
