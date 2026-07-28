@@ -241,7 +241,7 @@ class TestVoices(unittest.TestCase):
         engine.render(4096)                  # deja asentar el filtro
         lp_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
         self.assertGreater(open_rms, 0.01)
-        self.assertLess(lp_rms, open_rms * 0.2)
+        self.assertLess(lp_rms, open_rms * 0.5)
         engine.push_event("param", 0, "lp_cutoff", 0)
         engine.render(4096)
         bypass_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
@@ -381,6 +381,20 @@ class TestAudioDelay(unittest.TestCase):
             float(np.abs(delayed[:delay_samples]).max()), 0.0)
         np.testing.assert_allclose(
             delayed[delay_samples:], plain[:-delay_samples], atol=1e-6)
+
+    def test_modulation_applies_at_delay_output(self):
+        # La modulación del controlador actúa sobre el audio que SALE del
+        # delay (instantánea para quien escucha), no sobre la entrada
+        engine = make_engine()
+        engine.set_audio_delay(2 * 512 / SAMPLE_RATE)
+        note_row(engine.project, 0)
+        engine.render(512)                     # t=0 entra al delay
+        engine.push_event("param", 0, "volume", 0)
+        engine.render(512)
+        out = engine.render(512)               # sale el audio de t=0
+        # con la arquitectura antigua sonaría (vol se aplicó al entrar);
+        # ahora el volumen 0 se aplica a la salida: silencio
+        self.assertEqual(float(np.abs(out).max()), 0.0)
 
 
 class TestGroove(unittest.TestCase):

@@ -664,21 +664,24 @@ class Engine:
         self.finished = False           # True al recibir STOP
         self.events: queue.SimpleQueue = queue.SimpleQueue()
         self.unsupported_cmds: set[str] = set()
-        self._ch_bufs: dict[int, np.ndarray] = {}   # buffers por canal (filtro)
         self.muted: set[int] = set()    # canales silenciados (índice 0-7)
-        # Delay de audio (segundos): el secuenciador y los eventos MIDI van
-        # en tiempo real; solo la salida de audio se retrasa.
-        self._delay_buf: Optional[np.ndarray] = None
-        self._delay_pos = 0
+        # Delay de audio POR CANAL (segundos): el secuenciador y los
+        # eventos MIDI van en tiempo real (t=0); el audio sale retrasado.
+        # La modulación del controlador (vol/pan/drive/LP) se aplica a la
+        # salida del delay (t+1), en tiempo real para quien escucha.
+        self._stage: dict[int, np.ndarray] = {}     # render t=0 por canal
+        self._rings: list[Optional[np.ndarray]] = [None] * CHANNEL_COUNT
+        self._ring_pos = 0
         self.set_audio_delay(audio_delay)
 
     def set_audio_delay(self, seconds: float):
         """Configura el retardo de la salida de audio (0 = sin delay)."""
         n = int(seconds * self.sr)
-        self._delay_buf = (
+        self._rings = [
             np.zeros((n, 2), dtype=np.float32) if n > 0 else None
-        )
-        self._delay_pos = 0
+            for _ in range(CHANNEL_COUNT)
+        ]
+        self._ring_pos = 0
 
     # -- transporte ---------------------------------------------------------
 
@@ -725,29 +728,24 @@ class Engine:
     def render(self, frames: int) -> np.ndarray:
         """Renderiza `frames` samples estéreo float32.
 
-        El secuenciador y los eventos MIDI se procesan en tiempo real;
-        el audio devuelto sale retrasado `audio_delay` segundos si se
-        configuró (los primeros bloques son silencio).
+        Arquitectura de tiempos:
+          - t=0: secuenciador y eventos MIDI de LGPT, en tiempo real.
+          - Las voces se renderizan a un buffer por canal y entran en la
+            línea de retardo del canal (`audio_delay` segundos).
+          - t+1: el audio sale del delay y AHÍ se aplica la modulación
+            del controlador (volumen, pan, drive, LP), así que los pots
+            se oyen al instante. El pitch se aplica en la voz (t=0).
         """
         self._drain_events()
-        out = np.zeros((frames, 2), dtype=np.float32)
+        # 1. t=0: render de voces por canal
+        for ch in self.channels:
+            buf = self._stage.get(ch.idx)
+            if buf is None or len(buf) < frames:
+                buf = np.zeros((max(frames, 1024), 2), dtype=np.float32)
+                self._stage[ch.idx] = buf
+            else:
+                buf[:frames] = 0.0
         if self.playing:
-            # Canales con efectos activos (drive y/o LP) renderizan a un
-            # buffer propio y se procesan al final del bloque
-            fmap: dict[int, np.ndarray] = {}
-            for ch in self.channels:
-                if ch.idx in self.muted:
-                    continue
-                v = ch.voice
-                if v is not None and v.active and self._ch_fx_active(ch):
-                    buf = self._ch_bufs.get(ch.idx)
-                    if buf is None or len(buf) < frames:
-                        buf = np.zeros((max(frames, 1024), 2),
-                                       dtype=np.float32)
-                        self._ch_bufs[ch.idx] = buf
-                    else:
-                        buf[:frames] = 0.0
-                    fmap[ch.idx] = buf
             off = 0
             while off < frames and self.playing:
                 n = min(frames - off, int(self.tick_phase))
@@ -758,11 +756,11 @@ class Engine:
                         v = ch.voice
                         if v is not None:
                             if v.active:
-                                v.cc_vol = ch.cc_vol
-                                v.cc_pan = ch.cc_pan
+                                v.cc_vol = 1.0       # vol/pan del controlador
+                                v.cc_pan = None      # van tras el delay
                                 v.cc_pitch = ch.cc_pitch
                                 v.cc_cutoff = ch.cc_cutoff
-                                v.render(fmap.get(ch.idx, out), off, n)
+                                v.render(self._stage[ch.idx], off, n)
                             if not v.active:
                                 ch.voice = None
                     off += n
@@ -771,15 +769,46 @@ class Engine:
                     frac = self.tick_phase    # resto fraccionario ya consumido
                     self._process_tick()
                     self.tick_phase = self.samples_per_tick + frac
-            for ci, buf in fmap.items():
-                ch = self.channels[ci]
-                block = buf[:frames]
+        # 2. t+1: salida del delay, efectos del controlador y mezcla
+        out = np.zeros((frames, 2), dtype=np.float32)
+        for ch in self.channels:
+            block = self._delay_channel(ch, self._stage[ch.idx][:frames])
+            if ch.drive > 0.001:
                 self._render_drive(ch, block)
+            if ch.lp_cutoff > 0.001:
                 self._render_lp(ch, block)
-                out += block
-            out *= self.master
-            np.clip(out, -1.0, 1.0, out=out)
-        return self._apply_delay(out)
+            if ch.cc_vol != 1.0:
+                block *= ch.cc_vol
+            if ch.cc_pan is not None:
+                x = ch.cc_pan / 254.0
+                block[:, 0] *= min(1.0, 2.0 * (1.0 - x))
+                block[:, 1] *= min(1.0, 2.0 * x)
+            out += block
+        out *= self.master
+        np.clip(out, -1.0, 1.0, out=out)
+        return out
+
+    def _delay_channel(self, ch: Channel, block: np.ndarray) -> np.ndarray:
+        """Línea de retardo circular del canal; devuelve el bloque
+        retrasado (copia nueva) o el propio `block` si no hay delay."""
+        ring = self._rings[ch.idx]
+        if ring is None:
+            return block
+        frames = len(block)
+        d = len(ring)
+        pos = self._ring_pos
+        result = np.empty_like(block)
+        if frames <= d - pos:
+            result[:] = ring[pos:pos + frames]
+            ring[pos:pos + frames] = block
+        else:
+            k = d - pos
+            result[:k] = ring[pos:]
+            ring[pos:] = block[:k]
+            result[k:] = ring[:frames - k]
+            ring[:frames - k] = block[k:]
+        self._ring_pos = (pos + frames) % d
+        return result
 
     def _ch_fx_active(self, ch: Channel) -> bool:
         return ch.drive > 0.001 or ch.lp_cutoff > 0.001
@@ -857,28 +886,6 @@ class Engine:
                     y = -4.0
                 xs[i] = y
             st[side * 4:side * 4 + 4] = [x1, x2, y1, y2]
-
-    def _apply_delay(self, out: np.ndarray) -> np.ndarray:
-        """Línea de retardo circular sobre la salida (en pausa también
-        avanza, vaciando la cola de audio pendiente)."""
-        buf = self._delay_buf
-        if buf is None:
-            return out
-        frames = len(out)
-        d = len(buf)
-        pos = self._delay_pos
-        result = np.empty_like(out)
-        if frames <= d - pos:
-            result[:] = buf[pos:pos + frames]
-            buf[pos:pos + frames] = out
-        else:
-            k = d - pos
-            result[:k] = buf[pos:]
-            buf[pos:] = out[:k]
-            result[k:] = buf[:frames - k]
-            buf[:frames - k] = out[k:]
-        self._delay_pos = (pos + frames) % d
-        return result
 
     # -- eventos externos -----------------------------------------------------
 
