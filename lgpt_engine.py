@@ -777,6 +777,8 @@ class Engine:
                 self._render_drive(ch, block)
             if ch.lp_cutoff > 0.001:
                 self._render_lp(ch, block)
+                # compensación progresiva: hasta +20% al cerrar el filtro
+                block *= 1.0 + 0.2 * ch.lp_cutoff
             if ch.cc_vol != 1.0:
                 block *= ch.cc_vol
             if ch.cc_pan is not None:
