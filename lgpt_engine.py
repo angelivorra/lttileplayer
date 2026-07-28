@@ -784,11 +784,12 @@ class Engine:
         """Filtro LP del canal: LADSPA SVF si está disponible (Raspberry
         Pi con swh-plugins); si no, biquad RBJ propio.
 
-        Mapeo pensado para bajo: cutoff 80 Hz - 6 kHz (nunca se cierra
-        del todo) y resonancia 0.1 - 0.95 (siempre con carácter)."""
+        Mapeo: cutoff 80 Hz - 6 kHz (no se cierra del todo) y resonancia
+        0 - 0.95. Con cutoff a tope y resonancia a 0 el filtro no actúa
+        (bypass: sin efecto)."""
         cut = ch.lp_cutoff
         freq = 80.0 * (75.0 ** cut)              # 80 Hz .. 6 kHz
-        res = 0.1 + 0.85 * ch.lp_res
+        res = 0.95 * ch.lp_res
         if ch.lp_ladspa is None:
             try:
                 from ladspa_fx import LadspaStereoSVF
