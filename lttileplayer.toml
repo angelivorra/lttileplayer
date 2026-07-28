@@ -9,6 +9,7 @@ samplerate = 44100
 blocksize = 512
 delay = 1.0
 record = ""
+stream = 5050
 
 [midi]
 input = "LPD8"

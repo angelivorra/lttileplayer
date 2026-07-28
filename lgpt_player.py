@@ -33,6 +33,7 @@ import time
 import tomllib
 from pathlib import Path
 
+import numpy as np
 import sounddevice as sd
 
 from lgpt_engine import Engine, MidiOut, SAMPLE_RATE
@@ -74,6 +75,75 @@ def _pick_port(names: list[str], wanted: str | None, what: str) -> str | None:
         print(f"[midi] puerto '{wanted}' no encontrado; disponibles: {names}")
         return None
     return names[0]
+
+
+class TcpStreamer:
+    """Emite la salida de audio por TCP (PCM s16le estéreo) para escuchar
+    la Pi desde otro equipo. Escucha en un puerto; al conectar un cliente
+    empieza a enviar. En el PC: `nc <pi> <puerto> | aplay -f S16_LE -c 2`.
+
+    El callback encola bloques (cola acotada: si la red no da abasto se
+    descartan, no se bloquea el audio).
+    """
+
+    def __init__(self, port: int, samplerate: int):
+        import socket
+        self.samplerate = samplerate
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self.dropped = 0
+        self._queued = 0
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("0.0.0.0", port))
+        self._sock.listen(1)
+        self._client = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        import socket
+        while True:
+            if self._client is None:
+                try:
+                    self._sock.settimeout(0.5)
+                    self._client, addr = self._sock.accept()
+                    print(f"[stream] cliente conectado: {addr}")
+                    self._queued = 0
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+            try:
+                block = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            self._queued = max(0, self._queued - 1)
+            if block is None:
+                return
+            try:
+                self._client.sendall(block)
+            except OSError:
+                print("[stream] cliente desconectado")
+                self._client = None
+
+    def write(self, block: np.ndarray):
+        if self._client is None:
+            return
+        if self._queued > 200:                    # ~2.3 s de cola: descartar
+            self.dropped += 1
+            return
+        pcm = (np.clip(block, -1.0, 1.0) * 32767).astype(np.int16)
+        self._queue.put(pcm.tobytes())
+        self._queued += 1
+
+    def close(self):
+        self._queue.put(None)
+        try:
+            self._sock.close()
+            if self._client is not None:
+                self._client.close()
+        except OSError:
+            pass
 
 
 class WavRecorder:
@@ -391,6 +461,7 @@ class Player:
         self.midi_in = None
         self.midi_out: MidoMidiOut | None = None
         self.recorder: WavRecorder | None = None
+        self.streamer: TcpStreamer | None = None
         self.stream = sd.OutputStream(
             samplerate=args.samplerate,
             channels=2,
@@ -411,6 +482,9 @@ class Player:
         recorder = self.recorder
         if recorder is not None:
             recorder.write(outdata)
+        streamer = self.streamer
+        if streamer is not None:
+            streamer.write(outdata)
 
     def _load_song(self, index: int):
         project_dir = self.projects[index]
@@ -927,6 +1001,10 @@ class Player:
         if self.args.record:
             self.recorder = WavRecorder(self.args.record, self.args.samplerate)
             print(f"[audio] grabando salida en {self.args.record}")
+        if self.args.stream:
+            self.streamer = TcpStreamer(self.args.stream, self.args.samplerate)
+            print(f"[stream] escuchando en puerto {self.args.stream} "
+                  f"(en el PC: nc <pi> {self.args.stream} | aplay -f S16_LE)")
         self.stream.start()
         try:
             if sys.stdin.isatty():
@@ -942,6 +1020,8 @@ class Player:
             self.stream.close()
             if self.recorder is not None:
                 self.recorder.close()
+            if self.streamer is not None:
+                self.streamer.close()
             if self.midi_in is not None:
                 self.midi_in.close()
             if self.midi_out is not None:
@@ -967,6 +1047,8 @@ def main():
                         help="retardo de la salida de audio en segundos")
     parser.add_argument("--record", default=None, metavar="WAV",
                         help="graba la salida de audio a un archivo WAV")
+    parser.add_argument("--stream", type=int, default=None, metavar="PUERTO",
+                        help="emite la salida por TCP (PCM s16le)")
     args = parser.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -981,6 +1063,10 @@ def main():
     args.delay = args.delay if args.delay is not None else audio_cfg.get(
         "delay", 1.0)
     args.record = args.record or audio_cfg.get("record") or None
+    args.stream = (
+        args.stream if args.stream is not None
+        else audio_cfg.get("stream", 0) or None
+    )
     args.midi = args.midi if args.midi is not None else midi_cfg.get("input", "")
     args.midi_out = (
         args.midi_out if args.midi_out is not None
