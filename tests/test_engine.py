@@ -237,15 +237,15 @@ class TestVoices(unittest.TestCase):
         engine = make_engine()
         note_row(engine.project, 0, note=84)   # 440 Hz * 4 = 1760 Hz
         engine._process_tick()
-        open_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
+        open_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
         engine.push_event("param", 0, "lp_cutoff", 127)
-        engine.render(4096)                  # deja asentar el filtro
-        lp_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
+        engine.render(2048)                  # deja asentar el filtro
+        lp_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
         self.assertGreater(open_rms, 0.01)
         self.assertLess(lp_rms, open_rms * 0.5)
         engine.push_event("param", 0, "lp_cutoff", 0)
-        engine.render(4096)
-        bypass_rms = float(np.sqrt((engine.render(4096) ** 2).mean()))
+        engine.render(2048)
+        bypass_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
         self.assertGreater(bypass_rms, open_rms * 0.5)
 
     def test_drive(self):
