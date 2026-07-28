@@ -21,3 +21,12 @@ down = "note:9:36"
 accept = "note:9:38"
 play = "note:9:41"
 stop = "note:9:40"
+
+[pots]
+# Potenciómetros del controlador: "cc:canal:control",
+# "" = sin asignar.
+# Si todos están vacíos se usa el mapeo CC por defecto (1/7/10/20).
+cutoff = ""
+volume = ""
+pan = ""
+pitch = ""

@@ -132,12 +132,30 @@ def match_button(mapping: dict, msg) -> str | None:
     return None
 
 
+def match_pot(mapping: dict, msg) -> str | None:
+    """Devuelve el parámetro del pot que coincide con el mensaje, o None.
+
+    mapping: parámetro -> spec de parse_button_spec() ("cc:canal:control")."""
+    if msg.type != "control_change":
+        return None
+    for param, spec in mapping.items():
+        if spec is None:
+            continue
+        _mtype, ch, num = spec
+        if msg.channel == ch and msg.control == num:
+            return param
+    return None
+
+
 def open_midi_input(port_name: str | None, engine_ref: dict,
-                    ui_queue: queue.SimpleQueue, buttons: dict):
-    """Abre el puerto MIDI de entrada: botones a la UI y CCs al engine.
+                    ui_queue: queue.SimpleQueue, buttons: dict,
+                    pots: dict):
+    """Abre el puerto MIDI de entrada: botones a la UI y pots/CC al engine.
 
     engine_ref es un dict mutable con la clave "engine": el callback MIDI
     siempre usa el engine actual, aunque se cambie de canción.
+    Si hay pots configurados solo se procesan esos; si no, se usa el mapeo
+    CC por defecto del engine (1/7/10/20).
     """
     if port_name == "off":
         return None
@@ -151,8 +169,10 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
     if chosen is None:
         return None
 
+    use_pots = any(spec is not None for spec in pots.values())
+
     def on_message(msg):
-        # Los botones mapeados tienen prioridad sobre el CC en directo
+        # Los botones mapeados tienen prioridad sobre pots y CC
         action = match_button(buttons, msg)
         if action is not None:
             ui_queue.put(action)
@@ -160,7 +180,11 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
         engine = engine_ref.get("engine")
         if engine is None:
             return
-        if msg.type == "control_change":
+        if use_pots:
+            param = match_pot(pots, msg)
+            if param is not None:
+                engine.push_event("param", msg.channel % 8, param, msg.value)
+        elif msg.type == "control_change":
             engine.push_event("cc", msg.channel % 8, msg.control, msg.value)
 
     port = mido.open_input(chosen, callback=on_message)
@@ -366,7 +390,8 @@ class Player:
     def run(self):
         self.midi_out = open_midi_output(self.args.midi_out)
         self.midi_in = open_midi_input(
-            self.args.midi, self.engine_ref, self.ui_queue, self.buttons)
+            self.args.midi, self.engine_ref, self.ui_queue, self.buttons,
+            self.args.pots)
         self.stream.start()
         try:
             with Keyboard() as self.kb:
@@ -422,6 +447,10 @@ def main():
     args.buttons = {
         action: parse_button_spec(spec)
         for action, spec in cfg.get("buttons", {}).items()
+    }
+    args.pots = {
+        param: parse_button_spec(spec)
+        for param, spec in cfg.get("pots", {}).items()
     }
 
     Player(args).run()

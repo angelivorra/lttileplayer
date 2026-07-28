@@ -30,6 +30,13 @@ BUTTON_ACTIONS = [
     ("stop", "STOP (parar / volver a la lista)"),
 ]
 
+POT_ACTIONS = [
+    ("cutoff", "POTENCIÓMETRO de CUTOFF (filtro)"),
+    ("volume", "POTENCIÓMETRO de VOLUMEN"),
+    ("pan", "POTENCIÓMETRO de PAN"),
+    ("pitch", "POTENCIÓMETRO de PITCH"),
+]
+
 
 def load_existing() -> dict:
     if CONFIG_PATH.is_file():
@@ -197,6 +204,7 @@ def write_config(cfg: dict):
     audio = cfg["audio"]
     midi = cfg["midi"]
     buttons = cfg["buttons"]
+    pots = cfg["pots"]
     lines = [
         "# Configuración de lttileplayer (generada por lgpt_setup.py).",
         "# Los argumentos de línea de comandos tienen prioridad.",
@@ -219,6 +227,14 @@ def write_config(cfg: dict):
     ]
     for action, _label in BUTTON_ACTIONS:
         lines.append(f'{action} = "{buttons.get(action, "")}"')
+    lines += [
+        "",
+        "[pots]",
+        '# Potenciómetros del controlador: "cc:canal:control",',
+        '# "" = sin asignar.',
+    ]
+    for param, _label in POT_ACTIONS:
+        lines.append(f'{param} = "{pots.get(param, "")}"')
     CONFIG_PATH.write_text("\n".join(lines) + "\n")
     print(f"\nConfiguración guardada en {CONFIG_PATH}")
 
@@ -228,6 +244,7 @@ def main():
     audio = cfg.get("audio", {})
     midi = cfg.get("midi", {})
     buttons = cfg.get("buttons", {})
+    pots = cfg.get("pots", {})
 
     print("=== Configuración de lttileplayer ===")
 
@@ -246,14 +263,19 @@ def main():
         mido.get_input_names(), midi.get("input", ""))
 
     if midi["input"] and midi["input"] != "off":
-        print("\n--- Captura de botones ---")
         with mido.open_input(midi["input"]) as port:
+            print("\n--- Captura de botones ---")
             for action, label in BUTTON_ACTIONS:
                 buttons[action] = capture_button(
                     port, label, buttons.get(action, ""))
+            print("\n--- Captura de potenciómetros ---")
+            for param, label in POT_ACTIONS:
+                pots[param] = capture_button(
+                    port, label, pots.get(param, ""))
     else:
-        print("\nSin entrada MIDI: botones sin asignar.")
+        print("\nSin entrada MIDI: botones y pots sin asignar.")
         buttons = {action: "" for action, _ in BUTTON_ACTIONS}
+        pots = {param: "" for param, _ in POT_ACTIONS}
 
     write_config({
         "songs_dir": songs_dir,
@@ -265,6 +287,7 @@ def main():
         },
         "midi": midi,
         "buttons": buttons,
+        "pots": pots,
     })
 
 

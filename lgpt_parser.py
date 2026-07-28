@@ -199,9 +199,16 @@ class LGPTProject:
             self.tables[tid] = entry
 
     def _parse_grooves(self, node: ET.Element):
-        for child in node:
-            if child.tag == "DATA":
-                self.grooves = bytearray(decode_hex_buffer(node))
+        # El nodo GROOVES envuelve los chunks hex en un DATA intermedio:
+        # <GROOVES><DATA><DATA>hex</DATA>...</DATA></GROOVES>
+        out = bytearray()
+        for child in node.iter("DATA"):
+            value = child.get("VALUE")
+            if value is not None:
+                out.extend(bytes([int(value)]) * int(child.get("LENGTH", "0")))
+            elif child.text and child.text.strip():
+                out.extend(bytes.fromhex(child.text.strip()))
+        self.grooves = out
 
     def _parse_instruments(self, node: ET.Element):
         for instr in node.findall("INSTRUMENT"):

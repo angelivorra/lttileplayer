@@ -5,7 +5,7 @@ import unittest
 
 import mido
 
-from lgpt_player import match_button, parse_button_spec
+from lgpt_player import match_button, match_pot, parse_button_spec
 
 
 class TestParseButtonSpec(unittest.TestCase):
@@ -58,6 +58,30 @@ class TestMatchButton(unittest.TestCase):
         # El release (valor 0) no dispara
         msg = mido.Message("control_change", channel=0, control=41, value=0)
         self.assertIsNone(match_button(self.mapping, msg))
+
+
+class TestMatchPot(unittest.TestCase):
+    def setUp(self):
+        self.pots = {
+            "cutoff": parse_button_spec("cc:9:16"),
+            "volume": parse_button_spec("cc:9:17"),
+            "pan": None,
+            "pitch": None,
+        }
+
+    def test_pot_match(self):
+        msg = mido.Message("control_change", channel=9, control=16, value=80)
+        self.assertEqual(match_pot(self.pots, msg), "cutoff")
+        msg = mido.Message("control_change", channel=9, control=17, value=80)
+        self.assertEqual(match_pot(self.pots, msg), "volume")
+
+    def test_pot_no_match(self):
+        msg = mido.Message("control_change", channel=9, control=18, value=80)
+        self.assertIsNone(match_pot(self.pots, msg))
+        msg = mido.Message("control_change", channel=0, control=16, value=80)
+        self.assertIsNone(match_pot(self.pots, msg))
+        msg = mido.Message("note_on", channel=9, note=16, velocity=100)
+        self.assertIsNone(match_pot(self.pots, msg))
 
 
 if __name__ == "__main__":

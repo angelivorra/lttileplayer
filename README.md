@@ -39,12 +39,13 @@ Asistente interactivo (terminal, funciona también por SSH):
 ```
 
 Pregunta la carpeta de canciones, la salida de audio (lista numerada de
-dispositivos), el delay del audio, la salida MIDI, la entrada MIDI y luego
-pide pulsar cada botón del controlador:
-**arriba, abajo, aceptar, play, stop** (captura note on o CC). En los
-menús, pulsar **enter** conserva el valor guardado en el sistema (si no
-hay valor previo: carpeta `/home/angel/Documentos/canciones/` y delay de
-1 segundo); en la captura de botones, enter deja el botón sin asignar.
+dispositivos), el delay del audio, la salida MIDI, la entrada MIDI, luego
+pide pulsar cada botón del controlador (**arriba, abajo, aceptar, play,
+stop**, captura note on o CC) y por último los 4 potenciómetros
+(**cutoff, volumen, pan, pitch**, captura el primer CC que se mueva).
+En los menús, pulsar **enter** conserva el valor guardado en el sistema
+(si no hay valor previo: carpeta `/home/angel/Documentos/canciones/` y
+delay de 1 segundo); en las capturas, enter deja el botón/pot sin asignar.
 El resultado se guarda en `lttileplayer.toml`:
 
 ```toml
@@ -67,6 +68,12 @@ down = "note:0:37"
 accept = "note:0:38"
 play = "cc:0:41"
 stop = "cc:0:42"
+
+[pots]               # "cc:canal:control"; "" = sin asignar
+cutoff = "cc:0:16"   # si todos vacíos: mapeo por defecto CC1/7/10/20
+volume = "cc:0:17"
+pan = "cc:0:18"
+pitch = "cc:0:19"
 ```
 
 Los argumentos de línea de comandos (`--songs`, `--device`, `--midi`,
@@ -87,14 +94,10 @@ Teclas y botones MIDI asignados:
   `n`/`p` (o **abajo**/**arriba**) siguiente/anterior,
   `q` (o **stop**) vuelve a la lista.
 
-MIDI CC de entrada (canal MIDI 1-8 → canal tracker 0-7):
-
-| CC  | Parámetro                        |
-|-----|----------------------------------|
-| 1   | cutoff del filtro                |
-| 7   | volumen                          |
-| 10  | pan                              |
-| 20  | pitch (±1 octava, centro en 64)  |
+Modulación en directo con los pots configurados (canal MIDI 1-8 → canal
+tracker 0-7): cutoff, volumen, pan y pitch (±1 octava, centro en 64).
+Si no hay pots configurados se usan CC1=cutoff, CC7=volumen, CC10=pan
+y CC20=pitch.
 
 Salida MIDI: todos los eventos MIDI que genera LGPT salen por el puerto
 configurado para que los recoja otro programa o sintetizador:
@@ -124,7 +127,8 @@ Sartenazo v1):
 
 - Samples WAV (8/16 bits, mono/estéreo, cualquier frecuencia) por nombre.
 - Secuenciador song → chain → phrase con transposes y loop de sección.
-- Timing: tempo BPM, 6 ticks/step, avance sample-accurate sin deriva.
+- Timing: tempo BPM, avance sample-accurate sin deriva y grooves por
+  canal (patrón de longitudes de step en ticks; Bulebule usa [7,5,6,5]).
 - Pitch por nota (root note + fine tune), volumen, pan (pan law original),
   master volume, loop oneshot/forward, recorte por `end`.
 - Comandos: `VOLM` (rampas), `KILL`, `DLAY`, `LEGA`, `TABL`, `STOP`, `HOP`.
@@ -138,7 +142,7 @@ Sartenazo v1):
 - **Filtro en modo `scream`**: el original desborda punto fijo int32 a
   propósito; aquí se satura a [-2, 2]. Aproximación pendiente de ajuste
   fino a oído (solo afecta al instrumento "accordion").
-- Sin grooves personalizados (ninguna canción los usa), sin feedback,
-  slices, oscillator ni ping-pong.
+- Sin instrumentos de tipo soundfont, sin feedback, slices, oscillator
+  ni ping-pong.
 - El comando `STOP` detiene la canción; no hay avance automático a la
   siguiente (se pulsa `n` o `espacio`).

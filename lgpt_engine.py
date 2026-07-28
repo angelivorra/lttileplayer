@@ -5,7 +5,8 @@ Motor de audio para proyectos LittleGPTracker (LGPT).
 Réplica en Python/numpy del comportamiento del reproductor original
 (LittleGPTracker/sources), limitada a lo que usan las canciones del proyecto:
 
-  - Secuenciador song -> chain -> phrase, 6 ticks por step, sample-accurate.
+  - Secuenciador song -> chain -> phrase, ticks sample-accurate y
+    grooves por canal (patrones de longitud de step en ticks, GROV).
   - Voces de sample: pitch por nota (root note + fine tune), volumen con
     rampas (VOLM), pan con la panlaw original, loop oneshot/forward,
     recorte por 'end', crush/downsample, filtro del upstream.
@@ -459,12 +460,14 @@ class TablePlayback:
 
     Avanza una fila por tick en cada una de las 3 columnas de comandos.
     HOP posicional por columna con contador (param alto = repeticiones,
-    param bajo = fila destino). Sin groove ni automatización.
+    param bajo = fila destino). Groove propio por tabla (por defecto el
+    groove 255 = un paso por tick; se cambia con GROV en la tabla).
     """
 
     _COLS = (("cmd1", "param1"), ("cmd2", "param2"), ("cmd3", "param3"))
 
-    __slots__ = ("table", "pos", "hop_count", "hopped", "active")
+    __slots__ = ("table", "pos", "hop_count", "hopped", "active",
+                 "groove", "g_pos", "g_ticks")
 
     def __init__(self):
         self.table: Optional[dict] = None
@@ -472,49 +475,78 @@ class TablePlayback:
         self.hop_count = [[0] * 16 for _ in range(3)]
         self.hopped = [False, False, False]
         self.active = False
+        # Estado de groove de la tabla (groove_=255 = un paso por tick)
+        self.groove = 0xFF
+        self.g_pos = 0
+        self.g_ticks = 0
 
     def start(self, table: dict):
         self.table = table
         self.pos = [0, 0, 0]
         self.hop_count = [[0] * 16 for _ in range(3)]
+        self.groove = 0xFF
+        self.g_pos = 0
+        self.g_ticks = 0
         self.active = True
 
     def stop(self):
         self.active = False
         self.table = None
 
+    def _update_groove(self, groove_data) -> bool:
+        """Groove::UpdateGroove(reverse=true): True si toca avanzar fila."""
+        self.g_ticks += 1
+        if self.groove == 0xFF:
+            if self.g_ticks == 1:
+                self.g_ticks = 0
+                return True
+            return False
+        if self.g_ticks == groove_data[self.groove * 16 + self.g_pos]:
+            self.g_pos = (self.g_pos + 1) % 16
+            if groove_data[self.groove * 16 + self.g_pos] == 0xFF:
+                self.g_pos = 0
+            self.g_ticks = 0
+            return True
+        return False
+
     def step(self, ch: "Channel", engine: "Engine"):
         if not self.active or self.table is None:
             return
         t = self.table
-        for c, (ck, pk) in enumerate(self._COLS):
-            cmds = t[ck]
-            params = t[pk]
-            cmd = cmds[self.pos[c]]
-            param = params[self.pos[c]]
-            hopped = False
-            if cmd == "HOP ":
-                count = param >> 8
-                if self.hop_count[c][self.pos[c]] == 0:
-                    self.hop_count[c][self.pos[c]] = count
-                else:
-                    self.hop_count[c][self.pos[c]] -= 1
-                if self.hop_count[c][self.pos[c]] != 0 or count == 0:
-                    self.pos[c] = param & 0xF
-                else:
-                    self.pos[c] = (self.pos[c] + 1) % 16
-                hopped = True
+        if self.g_ticks == 0:
+            for c, (ck, pk) in enumerate(self._COLS):
+                cmds = t[ck]
+                params = t[pk]
                 cmd = cmds[self.pos[c]]
                 param = params[self.pos[c]]
-            self.hopped[c] = hopped
-            if cmd == "KILL":
-                ch.time_to_live = (param & 0xFF) + 1
-            elif cmd not in ("----", "HOP "):
-                engine._instrument_command(ch, cmd, param)
-        for c, (ck, _pk) in enumerate(self._COLS):
-            if t[ck][self.pos[c]] != "HOP " or not self.hopped[c]:
-                self.pos[c] = (self.pos[c] + 1) % 16
-            self.hopped[c] = False
+                hopped = False
+                if cmd == "HOP ":
+                    count = param >> 8
+                    if self.hop_count[c][self.pos[c]] == 0:
+                        self.hop_count[c][self.pos[c]] = count
+                    else:
+                        self.hop_count[c][self.pos[c]] -= 1
+                    if self.hop_count[c][self.pos[c]] != 0 or count == 0:
+                        self.pos[c] = param & 0xF
+                    else:
+                        self.pos[c] = (self.pos[c] + 1) % 16
+                    hopped = True
+                    cmd = cmds[self.pos[c]]
+                    param = params[self.pos[c]]
+                self.hopped[c] = hopped
+                if cmd == "KILL":
+                    ch.time_to_live = (param & 0xFF) + 1
+                elif cmd == "GROV":
+                    self.groove = param & 0x1F
+                    self.g_pos = 0
+                    self.g_ticks = 0
+                elif cmd not in ("----", "HOP "):
+                    engine._instrument_command(ch, cmd, param)
+        if self._update_groove(engine.groove_data):
+            for c, (ck, _pk) in enumerate(self._COLS):
+                if t[ck][self.pos[c]] != "HOP " or not self.hopped[c]:
+                    self.pos[c] = (self.pos[c] + 1) % 16
+                self.hopped[c] = False
 
 
 # --------------------------------------------------------------------------
@@ -528,6 +560,7 @@ class Channel:
         "last_instr", "last_note", "table",
         "cc_vol", "cc_pan", "cc_pitch", "cc_cutoff",
         "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
+        "groove", "g_pos", "g_ticks",
     )
 
     def __init__(self, idx: int):
@@ -555,6 +588,10 @@ class Channel:
         self.midi_note: Optional[int] = None   # nota sonando (None = off)
         self.midi_ticks = -1                   # cuenta atrás de note length
         self.midi_vel: Optional[int] = None    # velocity (MVEL)
+        # Estado de groove del canal (Groove::ChannelGroove del upstream)
+        self.groove = 0                        # groove seleccionado (GROV)
+        self.g_pos = 0                         # paso dentro del groove
+        self.g_ticks = 6                       # cuenta atrás de ticks del paso
 
 
 # --------------------------------------------------------------------------
@@ -600,6 +637,15 @@ class Engine:
         # Sink de eventos MIDI (instrumentos MIDI, MDCC/MDPG); lo asigna
         # el reproductor. None = no se emite nada.
         self.midi_out: Optional[MidiOut] = None
+        # Datos de groove: 0x20 grooves x 16 pasos (0xFF = fin de patrón).
+        # Si el proyecto no trae datos, patrón recto [6, 6].
+        g = project.grooves
+        if len(g) < 0x20 * 16:
+            g = bytearray([0xFF] * (0x20 * 16))
+            for i in range(0x20):
+                g[i * 16] = 6
+                g[i * 16 + 1] = 6
+        self.groove_data = g
         self.channels = [Channel(i) for i in range(CHANNEL_COUNT)]
         self.tick_count = 0
         self.tick_phase = 0.0           # samples hasta el próximo tick
@@ -637,6 +683,9 @@ class Engine:
             ch.time_to_start = 0
             ch.time_to_live = 0
             ch.last_instr = None
+            ch.groove = 0
+            ch.g_pos = 0
+            ch.g_ticks = self._groove_len(0, 0)
             for pos in range(256):
                 if self._is_playable(pos, ch.idx):
                     ch.playing = True
@@ -728,6 +777,8 @@ class Engine:
             kind = ev[0]
             if kind == "cc":
                 self._apply_cc(ev[1], ev[2], ev[3])
+            elif kind == "param":
+                self._apply_param(ev[1], ev[2], ev[3])
             elif kind == "play":
                 if self.finished:
                     self.start()
@@ -756,12 +807,31 @@ class Engine:
         elif cc == 1:
             ch.cc_cutoff = val / 127.0
 
+    def _apply_param(self, ci: int, name: str, val: int):
+        """Aplica un parámetro live por nombre (lo usan los pots mapeados
+        en la configuración)."""
+        if not 0 <= ci < CHANNEL_COUNT:
+            return
+        ch = self.channels[ci]
+        if name == "volume":
+            ch.cc_vol = val / 127.0
+        elif name == "pan":
+            ch.cc_pan = min(254, round(val * 254 / 127))
+        elif name == "pitch":
+            ch.cc_pitch = 2.0 ** ((val - 64) / 64.0)
+        elif name == "cutoff":
+            ch.cc_cutoff = val / 127.0
+
     # -- núcleo del secuenciador (Player::Trigger del upstream) ----------------
 
     def _process_tick(self):
-        if self.tick_count > 0 and self.tick_count % TICKS_PER_STEP == 0:
+        if self.tick_count > 0:
+            # Groove::Trigger + moveToNextStep: avance por canal según su
+            # groove (patrón de longitudes de step en ticks)
             for ch in self.channels:
-                self._advance_step(ch)
+                self._update_groove(ch)
+                if self._groove_trigger(ch):
+                    self._advance_step(ch)
         for ch in self.channels:
             if ch.time_to_start > 0:
                 ch.time_to_start -= 1
@@ -783,6 +853,32 @@ class Engine:
                 if ch.midi_ticks == 0:
                     self._midi_stop_note(ch)
         self.tick_count += 1
+
+    # -- groove (Application/Model/Groove.cpp del upstream) --------------------
+
+    def _groove_len(self, groove: int, pos: int) -> int:
+        v = self.groove_data[groove * 16 + pos]
+        return v if 0 < v < 0xFF else TICKS_PER_STEP
+
+    def _set_groove(self, ch: Channel, groove: int):
+        if groove >= 0x20:
+            return
+        ch.groove = groove
+        ch.g_pos = 0
+        ch.g_ticks = self._groove_len(groove, 0)
+
+    def _update_groove(self, ch: Channel):
+        # Groove::UpdateGroove(reverse=false)
+        if ch.g_ticks == 0:
+            ch.g_pos = (ch.g_pos + 1) % 16
+            if self.groove_data[ch.groove * 16 + ch.g_pos] == 0xFF:
+                ch.g_pos = 0
+            ch.g_ticks = self._groove_len(ch.groove, ch.g_pos)
+        ch.g_ticks -= 1
+
+    def _groove_trigger(self, ch: Channel) -> bool:
+        # Groove::TriggerChannel: toca avanzar cuando ticks llega a 0
+        return ch.g_ticks % self._groove_len(ch.groove, ch.g_pos) == 0
 
     def _advance_step(self, ch: Channel):
         if not ch.playing or ch.phrase == 0xFF:
@@ -968,6 +1064,13 @@ class Engine:
             self.finished = True
         elif cmd in ("HOP ", "DLAY"):
             pass                    # se procesan en el avance de step/trigger
+        elif cmd == "GROV":
+            groove = param & 0xFF
+            if param & 0xFF00:                # nibble alto: todos los canales
+                for c in self.channels:
+                    self._set_groove(c, groove)
+            else:
+                self._set_groove(ch, groove)
         elif cmd in ("VOLM", "LEGA", "MDCC", "MDPG", "MVEL"):
             self._instrument_command(ch, cmd, param)
         else:

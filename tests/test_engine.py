@@ -214,6 +214,22 @@ class TestVoices(unittest.TestCase):
         out = engine.render(512)
         self.assertEqual(float(np.abs(out).max()), 0.0)
 
+    def test_param_events(self):
+        engine = make_engine()
+        note_row(engine.project, 0)
+        engine._process_tick()
+        engine.push_event("param", 0, "volume", 0)
+        out = engine.render(512)
+        self.assertEqual(float(np.abs(out).max()), 0.0)
+        # pitch: una octava arriba duplica la velocidad de la voz
+        voice = engine.channels[0].voice
+        base = voice.base_speed
+        engine.push_event("param", 0, "pitch", 127)
+        engine.render(16)
+        self.assertAlmostEqual(
+            engine.channels[0].cc_pitch, 2.0 ** (63 / 64), places=5)
+        self.assertAlmostEqual(voice.base_speed, base)   # no cambia la base
+
 
 class TestMidiOut(unittest.TestCase):
     def make_midi_engine(self):
@@ -325,6 +341,56 @@ class TestAudioDelay(unittest.TestCase):
             delayed[delay_samples:], plain[:-delay_samples], atol=1e-6)
 
 
+class TestGroove(unittest.TestCase):
+    def make_groove_engine(self, pattern):
+        engine = make_engine()
+        engine.groove_data = bytearray([0xFF] * (0x20 * 16))
+        engine.groove_data[:len(pattern)] = pattern
+        engine.start()                     # re-inicia con el nuevo groove
+        return engine
+
+    def step_ticks(self, engine, n_steps):
+        """Intervalos en ticks entre avances consecutivos de la phrase."""
+        advances = []
+        prev = engine.channels[0].phrase_pos
+        for tick in range(1, 128):
+            engine._process_tick()
+            pos = engine.channels[0].phrase_pos
+            if pos != prev:
+                advances.append(tick)
+                prev = pos
+                if len(advances) >= n_steps + 1:
+                    break
+        return [b - a for a, b in zip(advances, advances[1:])]
+
+    def test_default_groove_is_straight(self):
+        engine = make_engine()
+        self.assertEqual(self.step_ticks(engine, 4), [6, 6, 6, 6])
+
+    def test_swing_groove(self):
+        # Patrón [3, 1]: el avance N ocurre al terminar el slot N, así que
+        # los intervalos son el patrón rotado: [1, 3, 1, 3, ...]
+        engine = self.make_groove_engine(bytearray([3, 1]))
+        self.assertEqual(self.step_ticks(engine, 5), [1, 3, 1, 3, 1])
+
+    def test_bulebule_groove(self):
+        # Groove real de Bulebule: [7, 5, 6, 5] (rotado por fase: empieza
+        # en el segundo slot)
+        engine = self.make_groove_engine(bytearray([7, 5, 6, 5]))
+        self.assertEqual(self.step_ticks(engine, 5), [5, 6, 5, 7, 5])
+
+    def test_grov_command(self):
+        engine = make_engine()
+        engine.project.cmd1[0] = "GROV"
+        engine.project.param1[0] = 1
+        engine.groove_data[16] = 3         # groove 1 = [3, 3]
+        engine.groove_data[17] = 3
+        engine._process_tick()             # procesa el GROV de la fila 0
+        ch = engine.channels[0]
+        self.assertEqual(ch.groove, 1)
+        self.assertEqual(ch.g_ticks, 3)
+
+
 @unittest.skipUnless(SONGS_DIR.is_dir(), "canciones no disponibles")
 class TestRealSongs(unittest.TestCase):
     def test_render_all_songs(self):
@@ -342,6 +408,26 @@ class TestRealSongs(unittest.TestCase):
                     energy += float((out ** 2).mean())
                 self.assertGreater(energy, 0.0, "salida silenciosa")
                 self.assertLessEqual(peak, 1.0, "clipping")
+
+
+    def test_bulebule_groove_timing(self):
+        # El groove 0 de Bulebule es [7,5,6,5]: los intervalos entre steps
+        # deben seguir ese patrón
+        engine = Engine(SONGS_DIR / "lgpt_Bulebule")
+        engine.start()
+        self.assertEqual(list(engine.groove_data[:4]), [7, 5, 6, 5])
+        ch = engine.channels[0]
+        advances = []
+        prev = ch.phrase_pos
+        for tick in range(1, 400):
+            engine._process_tick()
+            if ch.phrase_pos != prev:
+                advances.append(tick)
+                prev = ch.phrase_pos
+                if len(advances) >= 6:
+                    break
+        intervals = [b - a for a, b in zip(advances, advances[1:])]
+        self.assertEqual(intervals, [5, 6, 5, 7, 5])
 
 
 if __name__ == "__main__":
