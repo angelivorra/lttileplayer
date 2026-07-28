@@ -382,6 +382,25 @@ class TestAudioDelay(unittest.TestCase):
         np.testing.assert_allclose(
             delayed[delay_samples:], plain[:-delay_samples], atol=1e-6)
 
+    def test_delay_multichannel_no_crosstalk(self):
+        # Con delay mayor que un bloque y varios canales, el audio
+        # retrasado debe ser exactamente el mismo desplazado (sin
+        # corrupción ni cruce entre canales)
+        delay_samples = 3 * 512
+        e1 = make_engine()
+        note_row(e1.project, 0)
+        note_row(e1.project, 4, note=48)
+        e2 = make_engine()
+        note_row(e2.project, 0)
+        note_row(e2.project, 4, note=48)
+        e2.set_audio_delay(delay_samples / SAMPLE_RATE)
+        plain = np.concatenate([e1.render(512) for _ in range(12)])
+        delayed = np.concatenate([e2.render(512) for _ in range(12)])
+        self.assertEqual(
+            float(np.abs(delayed[:delay_samples]).max()), 0.0)
+        np.testing.assert_allclose(
+            delayed[delay_samples:], plain[:-delay_samples], atol=1e-6)
+
     def test_modulation_applies_at_delay_output(self):
         # La modulación del controlador actúa sobre el audio que SALE del
         # delay (instantánea para quien escucha), no sobre la entrada

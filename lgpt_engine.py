@@ -671,7 +671,7 @@ class Engine:
         # salida del delay (t+1), en tiempo real para quien escucha.
         self._stage: dict[int, np.ndarray] = {}     # render t=0 por canal
         self._rings: list[Optional[np.ndarray]] = [None] * CHANNEL_COUNT
-        self._ring_pos = 0
+        self._ring_pos = [0] * CHANNEL_COUNT
         self.set_audio_delay(audio_delay)
 
     def set_audio_delay(self, seconds: float):
@@ -681,7 +681,7 @@ class Engine:
             np.zeros((n, 2), dtype=np.float32) if n > 0 else None
             for _ in range(CHANNEL_COUNT)
         ]
-        self._ring_pos = 0
+        self._ring_pos = [0] * CHANNEL_COUNT
 
     # -- transporte ---------------------------------------------------------
 
@@ -796,7 +796,7 @@ class Engine:
             return block
         frames = len(block)
         d = len(ring)
-        pos = self._ring_pos
+        pos = self._ring_pos[ch.idx]
         result = np.empty_like(block)
         if frames <= d - pos:
             result[:] = ring[pos:pos + frames]
@@ -807,7 +807,7 @@ class Engine:
             ring[pos:] = block[:k]
             result[k:] = ring[:frames - k]
             ring[:frames - k] = block[k:]
-        self._ring_pos = (pos + frames) % d
+        self._ring_pos[ch.idx] = (pos + frames) % d
         return result
 
     def _ch_fx_active(self, ch: Channel) -> bool:
