@@ -86,9 +86,10 @@ class TcpStreamer:
     descartan, no se bloquea el audio).
     """
 
-    def __init__(self, port: int, samplerate: int):
+    def __init__(self, port: int, samplerate: int, on_event=None):
         import socket
         self.samplerate = samplerate
+        self._on_event = on_event            # callback(msg) para la UI
         self._queue: queue.SimpleQueue = queue.SimpleQueue()
         self.dropped = 0
         self._queued = 0
@@ -100,6 +101,10 @@ class TcpStreamer:
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
+    def _notify(self, msg: str):
+        if self._on_event is not None:
+            self._on_event(msg)
+
     def _run(self):
         import socket
         while True:
@@ -107,7 +112,7 @@ class TcpStreamer:
                 try:
                     self._sock.settimeout(0.5)
                     self._client, addr = self._sock.accept()
-                    print(f"[stream] cliente conectado: {addr}")
+                    self._notify(f"stream conectado: {addr[0]}")
                     self._queued = 0
                 except socket.timeout:
                     continue
@@ -123,7 +128,7 @@ class TcpStreamer:
             try:
                 self._client.sendall(block)
             except OSError:
-                print("[stream] cliente desconectado")
+                self._notify("stream desconectado")
                 self._client = None
 
     def write(self, block: np.ndarray):
@@ -461,6 +466,7 @@ class Player:
         self.midi_in = None
         self.midi_out: MidoMidiOut | None = None
         self.recorder: WavRecorder | None = None
+        self._notice: tuple | None = None   # (mensaje, timestamp) para la UI
         self.streamer: TcpStreamer | None = None
         self.stream = sd.OutputStream(
             samplerate=args.samplerate,
@@ -520,6 +526,22 @@ class Player:
             except queue.Empty:
                 return
 
+    def _set_notice(self, msg: str):
+        """Aviso breve en la línea inferior de la UI (thread-safe)."""
+        self._notice = (msg, time.time())
+
+    def _draw_notice(self, scr, curses, y: int):
+        if self._notice is not None:
+            msg, ts = self._notice
+            if time.time() - ts < 3.0:
+                try:
+                    scr.addstr(y, 1, msg[:60],
+                               curses.color_pair(5) | curses.A_BOLD)
+                except curses.error:
+                    pass
+            else:
+                self._notice = None
+
     def _draw_list(self, scr, curses):
         """ROBOTRACA a texto de consola + 3 canciones centradas (scroll
         infinito): prev/next con medio-bloques, seleccionada al doble."""
@@ -546,6 +568,7 @@ class Player:
         y += 5 * sel_scale + 1
         big_text_half(scr, y, max(0, (w - len(nxt) * 4) // 2), nxt,
                       self._pair_dim)
+        self._draw_notice(scr, curses, h - 1)
         scr.refresh()
 
     def _draw_song(self, scr, curses, engine: Engine):
@@ -604,6 +627,7 @@ class Player:
                     scr.addstr(y, 10, "·", curses.color_pair(3))
         scr.addstr(h - 1, 1, "espacio: pausa  n/p: canción  q: lista"[:w - 2],
                    curses.color_pair(3))
+        self._draw_notice(scr, curses, h - 2)
         scr.refresh()
 
     def _curses_main(self, scr):
@@ -631,7 +655,11 @@ class Player:
         self._pair_dim = curses.color_pair(3) | curses.A_DIM
         scr.timeout(100)
         engine = None
+        needs_clear = True                # limpieza completa al cambiar de vista
         while True:                       # vista lista
+            if needs_clear:
+                scr.clear()
+                needs_clear = False
             self._drain_buttons()
             try:
                 self._draw_list(scr, curses)
@@ -647,6 +675,7 @@ class Player:
                 self.projects = find_projects(Path(self.args.songs)) or \
                     self.projects
                 self.index %= len(self.projects)
+                needs_clear = True
             elif key in ("up", "k"):
                 self.index = (self.index - 1) % len(self.projects)
             elif key in ("down", "j"):
@@ -654,6 +683,7 @@ class Player:
             elif key in ("\r", "\n"):
                 engine = self._load_song(self.index)
                 self._drain_buttons()
+                scr.clear()               # limpieza al entrar en la canción
                 while True:               # vista canción
                     try:
                         self._draw_song(scr, curses, engine)
@@ -674,6 +704,7 @@ class Player:
                     elif key in ("q", "esc"):
                         engine.push_event("stop")
                         self.engine_ref["engine"] = None
+                        needs_clear = True
                         break
 
     def _config_view(self, scr, curses):
@@ -1002,9 +1033,9 @@ class Player:
             self.recorder = WavRecorder(self.args.record, self.args.samplerate)
             print(f"[audio] grabando salida en {self.args.record}")
         if self.args.stream:
-            self.streamer = TcpStreamer(self.args.stream, self.args.samplerate)
-            print(f"[stream] escuchando en puerto {self.args.stream} "
-                  f"(en el PC: nc <pi> {self.args.stream} | aplay -f S16_LE)")
+            self.streamer = TcpStreamer(self.args.stream, self.args.samplerate,
+                                        on_event=self._set_notice)
+            self._set_notice(f"stream puerto {self.args.stream}")
         self.stream.start()
         try:
             if sys.stdin.isatty():

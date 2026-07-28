@@ -649,7 +649,10 @@ class SatanFx:
             self.plugin.run(buf)
         else:
             np.tanh(buf * (1.0 + 30.0 * amount), out=buf)
-        buf *= 1.0 / (1.0 + 2.0 * amount)
+        # compensación fuerte + limitador: la destrucción sin el disparo
+        buf *= 1.0 / (1.0 + 3.0 * amount)
+        if amount > 0.001:
+            np.tanh(buf, out=buf)
 
 
 # Presets disponibles para los pots (target = "canal:nombre"). El orden
