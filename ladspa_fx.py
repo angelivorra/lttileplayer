@@ -333,6 +333,50 @@ class LadspaStereoDivider:
         buf[:, 1] = right
 
 
+SATAN_PATH = "/usr/lib/ladspa/satan_maximiser_1408.so"
+SATAN_ID = 1408
+
+# Puertos de Barry's Satan Maximiser
+SAT_DECAY = 0           # 2-30 samples
+SAT_KNEE = 1            # -90 a 0 dB (0 = limpio, -90 = destrucción)
+SAT_INPUT = 2
+SAT_OUTPUT = 3
+
+
+class LadspaSatan(LadspaPlugin):
+    """Barry's Satan Maximiser (swh): maximizador/distorsión brutal."""
+
+    def __init__(self, sample_rate: int, path: str = SATAN_PATH):
+        super().__init__(path, SATAN_ID, sample_rate)
+        self.set_control(SAT_DECAY, 30.0)
+
+    def set(self, knee_db: float):
+        self.set_control(SAT_KNEE, min(max(knee_db, -90.0), 0.0))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, SAT_INPUT, SAT_OUTPUT)
+
+
+class LadspaStereoSatan:
+    """Dos instancias mono para el buffer estéreo del canal."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaSatan(sample_rate)
+        self.right = LadspaSatan(sample_rate)
+
+    def set(self, knee_db: float):
+        self.left.set(knee_db)
+        self.right.set(knee_db)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100

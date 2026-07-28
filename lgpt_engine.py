@@ -550,6 +550,116 @@ class TablePlayback:
 
 
 # --------------------------------------------------------------------------
+# Presets de efectos (cadena por canal, a la salida del delay)
+# --------------------------------------------------------------------------
+
+class SuboctaveFx:
+    """Audio Divider: suboctava del bajo (denominador 1 -> 4 al subir)."""
+
+    def __init__(self, sr: int):
+        try:
+            from ladspa_fx import LadspaStereoDivider
+            self.plugin = LadspaStereoDivider(sr)
+        except Exception:
+            self.plugin = None
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if self.plugin is not None:
+            self.plugin.set(1.0 + amount * 3.0)
+            self.plugin.run(buf)
+        else:
+            np.tanh(buf * (1.0 + 20.0 * amount), out=buf)
+
+
+class AcidLpFx:
+    """C* AutoFilter LP: barrido 3800 -> 780 Hz (50% log) con resonancia
+    y compensación de volumen progresiva hasta +40%."""
+
+    COMP = 0.40
+
+    def __init__(self, sr: int):
+        self.sr = sr
+        self.plugin = None
+        for cls in ("LadspaStereoAutoFilter", "LadspaStereoSVF"):
+            try:
+                mod = __import__("ladspa_fx")
+                self.plugin = getattr(mod, cls)(sr)
+                break
+            except Exception:
+                continue
+        self.coef: Optional[tuple] = None
+        self.state = [0.0] * 8
+
+    def apply(self, buf: np.ndarray, amount: float):
+        freq = 3800.0 * (160.0 / 3800.0) ** (amount * 0.5)
+        res = 0.85 * amount * 0.5
+        if self.plugin is not None:
+            self.plugin.set(freq_hz=freq, res=res)
+            self.plugin.run(buf)
+        else:
+            self._biquad(buf, amount, freq, res)
+        buf *= 1.0 + self.COMP * amount
+
+    def _biquad(self, buf: np.ndarray, cut: float, freq: float, res: float):
+        if self.coef is None or self.coef[0] != cut or self.coef[1] != res:
+            q = 0.5 + res * 9.5
+            w0 = 2.0 * math.pi * freq / self.sr
+            alpha = math.sin(w0) / (2.0 * q)
+            cosw = math.cos(w0)
+            a0 = 1.0 + alpha
+            b0 = (1.0 - cosw) * 0.5 / a0
+            b1 = (1.0 - cosw) / a0
+            a1 = -2.0 * cosw / a0
+            a2 = (1.0 - alpha) / a0
+            self.coef = (cut, res, b0, b1, b0, a1, a2)
+        _c, _r, b0, b1, b2, a1, a2 = self.coef
+        st = self.state
+        for side in range(2):
+            x1, x2, y1, y2 = st[side * 4:side * 4 + 4]
+            xs = buf[:, side]
+            for i in range(len(xs)):
+                x = xs[i]
+                y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+                x2, x1 = x1, x
+                y2, y1 = y1, y
+                if y > 4.0:
+                    y = 4.0
+                elif y < -4.0:
+                    y = -4.0
+                xs[i] = y
+            st[side * 4:side * 4 + 4] = [x1, x2, y1, y2]
+
+
+class SatanFx:
+    """Barry's Satan Maximiser: knee 0 -> -60 dB (destrucción progresiva)."""
+
+    KNEE_MAX = -60.0
+
+    def __init__(self, sr: int):
+        try:
+            from ladspa_fx import LadspaStereoSatan
+            self.plugin = LadspaStereoSatan(sr)
+        except Exception:
+            self.plugin = None
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if self.plugin is not None:
+            self.plugin.set(self.KNEE_MAX * amount)
+            self.plugin.run(buf)
+        else:
+            np.tanh(buf * (1.0 + 30.0 * amount), out=buf)
+
+
+# Presets disponibles para los pots (target = "canal:nombre"). El orden
+# de este dict es el orden de la cadena: suboctava/drive -> filtro.
+EFFECT_PRESETS = {
+    "suboctave": SuboctaveFx,
+    "satan": SatanFx,
+    "acid_lp": AcidLpFx,
+}
+
+
+# --------------------------------------------------------------------------
 # Canal del secuenciador
 # --------------------------------------------------------------------------
 
@@ -561,8 +671,7 @@ class Channel:
         "cc_vol", "cc_pan", "cc_pitch", "cc_cutoff",
         "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
         "groove", "g_pos", "g_ticks",
-        "lp_cutoff", "lp_res", "lp_coef", "lp_state", "lp_ladspa",
-        "drive", "drive_ladspa",
+        "fx_amounts", "fx_objs",
     )
 
     def __init__(self, idx: int):
@@ -594,15 +703,9 @@ class Channel:
         self.groove = 0                        # groove seleccionado (GROV)
         self.g_pos = 0                         # paso dentro del groove
         self.g_ticks = 6                       # cuenta atrás de ticks del paso
-        # Filtro LP con resonancia del canal (efecto live, no del upstream)
-        self.lp_cutoff = 0.0                   # cantidad: 0 = bypass
-        self.lp_res = 0.0                      # 0-1
-        self.lp_coef: Optional[tuple] = None   # (b0,b1,b2,a1,a2)
-        self.lp_state = [0.0, 0.0, 0.0, 0.0,   # x1,x2,y1,y2 (L)
-                         0.0, 0.0, 0.0, 0.0]   # x1,x2,y1,y2 (R)
-        self.lp_ladspa = None                  # LadspaStereoSVF | False
-        self.drive = 0.0                       # overdrive 0-1 (0 = limpio)
-        self.drive_ladspa = None               # LadspaStereoOverdrive | False
+        # Efectos live del canal (presets LADSPA): nombre -> cantidad 0-1
+        self.fx_amounts: dict[str, float] = {}
+        self.fx_objs: dict[str, object] = {}
 
 
 # --------------------------------------------------------------------------
@@ -773,12 +876,14 @@ class Engine:
         out = np.zeros((frames, 2), dtype=np.float32)
         for ch in self.channels:
             block = self._delay_channel(ch, self._stage[ch.idx][:frames])
-            if ch.drive > 0.001:
-                self._render_drive(ch, block)
-            if ch.lp_cutoff > 0.001:
-                self._render_lp(ch, block)
-                # compensación progresiva: hasta +20% al cerrar el filtro
-                block *= 1.0 + 0.2 * ch.lp_cutoff
+            for name, cls in EFFECT_PRESETS.items():
+                amount = ch.fx_amounts.get(name, 0.0)
+                if amount > 0.001:
+                    fx = ch.fx_objs.get(name)
+                    if fx is None:
+                        fx = cls(self.sr)
+                        ch.fx_objs[name] = fx
+                    fx.apply(block, amount)
             if ch.cc_vol != 1.0:
                 block *= ch.cc_vol
             if ch.cc_pan is not None:
@@ -811,84 +916,6 @@ class Engine:
             ring[:frames - k] = block[k:]
         self._ring_pos[ch.idx] = (pos + frames) % d
         return result
-
-    def _ch_fx_active(self, ch: Channel) -> bool:
-        return ch.drive > 0.001 or ch.lp_cutoff > 0.001
-
-    def _lp_active(self, ch: Channel) -> bool:
-        return ch.lp_cutoff > 0.001
-
-    def _render_drive(self, ch: Channel, buf: np.ndarray):
-        """Efecto del canal (Audio Divider: suboctava; fallback tanh).
-        drive 0 = bypass; al subir, denominador 1 -> 4."""
-        if ch.drive <= 0.001:
-            return
-        if ch.drive_ladspa is None:
-            try:
-                from ladspa_fx import LadspaStereoDivider
-                ch.drive_ladspa = LadspaStereoDivider(self.sr)
-            except Exception:
-                ch.drive_ladspa = False
-        if ch.drive_ladspa:
-            ch.drive_ladspa.set(1.0 + ch.drive * 3.0)
-            ch.drive_ladspa.run(buf)
-        else:
-            k = 1.0 + 20.0 * ch.drive
-            np.tanh(buf * k, out=buf)
-
-    def _render_lp(self, ch: Channel, buf: np.ndarray):
-        """Filtro LP acid del canal (C* AutoFilter > SVF > biquad propio).
-
-        Mapeo con regla 0 = bypass: lp_cutoff es la CANTIDAD de efecto —
-        a 0 el filtro está abierto (3800 Hz, bypass) y al subir cierra
-        hacia 780 Hz (el 50% del recorrido log, para que el bajo no
-        pierda presencia del todo) con resonancia hasta 0.43."""
-        cut = ch.lp_cutoff
-        if cut <= 0.001:
-            return
-        freq = 3800.0 * (160.0 / 3800.0) ** (cut * 0.5)   # 3800 -> 780 Hz
-        res = 0.85 * cut * 0.5                            # hasta 0.43
-        if ch.lp_ladspa is None:
-            # Preferencia: C* AutoFilter (acid) > SVF > biquad propio
-            ch.lp_ladspa = False
-            for cls in ("LadspaStereoAutoFilter", "LadspaStereoSVF"):
-                try:
-                    mod = __import__("ladspa_fx")
-                    ch.lp_ladspa = getattr(mod, cls)(self.sr)
-                    break
-                except Exception:
-                    continue
-        if ch.lp_ladspa:
-            ch.lp_ladspa.set(freq_hz=freq, res=res)
-            ch.lp_ladspa.run(buf)
-            return
-        if ch.lp_coef is None or ch.lp_coef[0] != cut or ch.lp_coef[1] != res:
-            q = 0.5 + res * 9.5
-            w0 = 2.0 * math.pi * freq / self.sr
-            alpha = math.sin(w0) / (2.0 * q)
-            cosw = math.cos(w0)
-            a0 = 1.0 + alpha
-            b0 = (1.0 - cosw) * 0.5 / a0
-            b1 = (1.0 - cosw) / a0
-            a1 = -2.0 * cosw / a0
-            a2 = (1.0 - alpha) / a0
-            ch.lp_coef = (cut, res, b0, b1, b0, a1, a2)
-        _c, _r, b0, b1, b2, a1, a2 = ch.lp_coef
-        st = ch.lp_state
-        for side in range(2):
-            x1, x2, y1, y2 = st[side * 4:side * 4 + 4]
-            xs = buf[:, side]
-            for i in range(len(xs)):
-                x = xs[i]
-                y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-                x2, x1 = x1, x
-                y2, y1 = y1, y
-                if y > 4.0:
-                    y = 4.0
-                elif y < -4.0:
-                    y = -4.0
-                xs[i] = y
-            st[side * 4:side * 4 + 4] = [x1, x2, y1, y2]
 
     # -- eventos externos -----------------------------------------------------
 
@@ -945,12 +972,8 @@ class Engine:
             ch.cc_pitch = 2.0 ** ((val - 64) / 64.0)
         elif name == "cutoff":
             ch.cc_cutoff = val / 127.0
-        elif name == "lp_cutoff":
-            ch.lp_cutoff = val / 127.0
-        elif name == "lp_res":
-            ch.lp_res = val / 127.0
-        elif name == "drive":
-            ch.drive = val / 127.0
+        elif name in EFFECT_PRESETS:
+            ch.fx_amounts[name] = val / 127.0
 
     # -- núcleo del secuenciador (Player::Trigger del upstream) ----------------
 

@@ -231,37 +231,47 @@ class TestVoices(unittest.TestCase):
         self.assertAlmostEqual(voice.base_speed, base)   # no cambia la base
 
     def test_lp_filter(self):
-        # lp_cutoff es cantidad de efecto: 127 = filtro al 50% del
+        # acid_lp es cantidad de efecto: 127 = filtro al 50% del
         # recorrido (~780 Hz); con una nota aguda (1760 Hz) debe atenuar,
         # y a 0 es bypass
         engine = make_engine()
         note_row(engine.project, 0, note=84)   # 440 Hz * 4 = 1760 Hz
         engine._process_tick()
         open_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
-        engine.push_event("param", 0, "lp_cutoff", 127)
+        engine.push_event("param", 0, "acid_lp", 127)
         engine.render(2048)                  # deja asentar el filtro
         lp_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
         self.assertGreater(open_rms, 0.01)
         self.assertLess(lp_rms, open_rms * 0.5)
-        engine.push_event("param", 0, "lp_cutoff", 0)
+        engine.push_event("param", 0, "acid_lp", 0)
         engine.render(2048)
         bypass_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
         self.assertGreater(bypass_rms, open_rms * 0.5)
 
     def test_drive(self):
-        # drive 0 = limpio; al subir distorsiona (cambia la forma de onda)
+        # los presets de distorsión/suboctava a 0 no actúan y al subir
+        # cambian la señal
         engine = make_engine()
         note_row(engine.project, 0)
         engine._process_tick()
-        engine.push_event("param", 0, "drive", 0)
-        clean = engine.render(4096).copy()
-        engine.push_event("param", 0, "drive", 127)
+        engine.push_event("param", 0, "suboctave", 0)
+        clean = engine.render(2048).copy()
+        engine.push_event("param", 0, "suboctave", 127)
         engine.render(2048)
-        driven = engine.render(4096)
+        driven = engine.render(2048)
         rms_clean = float(np.sqrt((clean ** 2).mean()))
         rms_driven = float(np.sqrt((driven ** 2).mean()))
         self.assertGreater(rms_clean, 0.01)
         self.assertNotAlmostEqual(rms_clean, rms_driven, places=3)
+
+    def test_satan_preset(self):
+        engine = make_engine()
+        note_row(engine.project, 0)
+        engine._process_tick()
+        engine.push_event("param", 0, "satan", 100)
+        out = engine.render(2048)
+        self.assertFalse(np.isnan(out).any())
+        self.assertGreater(float(np.abs(out).max()), 0.0)
 
     def test_muted_channel(self):
         engine = make_engine()

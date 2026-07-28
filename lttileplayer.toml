@@ -31,11 +31,11 @@ stop = "note:9:37"
 # Potenciómetros: cc = "cc:canal:control" (capturado aquí),
 # target = "canal:parametro" (canal LGPT 0-7; parametro:
 # lp_cutoff, lp_res, volume, pan, pitch; "" = sin asignar).
-pot1 = { cc = "cc:0:70", target = "2:drive" }
-pot2 = { cc = "cc:0:71", target = "" }
+pot1 = { cc = "cc:0:70", target = "2:suboctave" }
+pot2 = { cc = "cc:0:71", target = "5:satan" }
 pot3 = { cc = "cc:0:72", target = "" }
 pot4 = { cc = "cc:0:73", target = "" }
-pot5 = { cc = "cc:0:74", target = "2:lp_cutoff" }
-pot6 = { cc = "cc:0:75", target = "" }
+pot5 = { cc = "cc:0:74", target = "2:acid_lp" }
+pot6 = { cc = "cc:0:75", target = "5:acid_lp" }
 pot7 = { cc = "cc:0:76", target = "" }
 pot8 = { cc = "cc:0:77", target = "" }
