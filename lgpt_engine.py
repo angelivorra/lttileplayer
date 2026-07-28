@@ -561,7 +561,7 @@ class Channel:
         "cc_vol", "cc_pan", "cc_pitch", "cc_cutoff",
         "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
         "groove", "g_pos", "g_ticks",
-        "lp_cutoff", "lp_res", "lp_coef", "lp_state",
+        "lp_cutoff", "lp_res", "lp_coef", "lp_state", "lp_ladspa",
     )
 
     def __init__(self, idx: int):
@@ -599,6 +599,7 @@ class Channel:
         self.lp_coef: Optional[tuple] = None   # (b0,b1,b2,a1,a2)
         self.lp_state = [0.0, 0.0, 0.0, 0.0,   # x1,x2,y1,y2 (L)
                          0.0, 0.0, 0.0, 0.0]   # x1,x2,y1,y2 (R)
+        self.lp_ladspa = None                  # LadspaStereoSVF | False
 
 
 # --------------------------------------------------------------------------
@@ -775,10 +776,22 @@ class Engine:
         return ch.lp_cutoff < 0.999 or ch.lp_res > 0.001
 
     def _render_lp(self, ch: Channel, buf: np.ndarray):
-        """Biquad LP (RBJ cookbook) con cutoff log 40Hz-16kHz y Q 0.5-10."""
-        cut, res = ch.lp_cutoff, ch.lp_res
+        """Filtro LP del canal: LADSPA SVF si está disponible (Raspberry
+        Pi con swh-plugins); si no, biquad RBJ propio."""
+        cut = ch.lp_cutoff
+        freq = min(40.0 * (400.0 ** cut), self.sr * 0.45)
+        if ch.lp_ladspa is None:
+            try:
+                from ladspa_fx import LadspaStereoSVF
+                ch.lp_ladspa = LadspaStereoSVF(self.sr)
+            except Exception:
+                ch.lp_ladspa = False        # sin plugin: biquad propio
+        if ch.lp_ladspa:
+            ch.lp_ladspa.set(freq_hz=freq, res=ch.lp_res)
+            ch.lp_ladspa.run(buf)
+            return
+        res = ch.lp_res
         if ch.lp_coef is None or ch.lp_coef[0] != cut or ch.lp_coef[1] != res:
-            freq = min(40.0 * (400.0 ** cut), self.sr * 0.45)
             q = 0.5 + res * 9.5
             w0 = 2.0 * math.pi * freq / self.sr
             alpha = math.sin(w0) / (2.0 * q)
