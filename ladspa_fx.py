@@ -52,16 +52,10 @@ class _Descriptor(ctypes.Structure):
     ]
 
 
-class LadspaSVF:
-    """State Variable Filter LADSPA para un canal de audio.
+class LadspaPlugin:
+    """Instancia genérica de un plugin LADSPA (un canal de audio)."""
 
-    Uso:
-        fx = LadspaSVF(44100)          # falla si no hay plugin
-        fx.set(freq_hz=440.0, res=0.5)
-        fx.run(buffer_float32_mono)    # in-place
-    """
-
-    def __init__(self, sample_rate: int, path: str = SVF_PATH):
+    def __init__(self, path: str, unique_id: int, sample_rate: int):
         if not Path(path).is_file():
             raise FileNotFoundError(path)
         self._lib = ctypes.CDLL(path)
@@ -69,15 +63,15 @@ class LadspaSVF:
         desc_fn.restype = ctypes.POINTER(_Descriptor)
         desc_fn.argtypes = [ctypes.c_ulong]
         desc_ptr = None
-        for i in range(256):
+        for i in range(512):
             d = desc_fn(i)
             if not d:
                 break
-            if d.contents.UniqueID == SVF_ID:
+            if d.contents.UniqueID == unique_id:
                 desc_ptr = d
                 break
         if desc_ptr is None:
-            raise RuntimeError(f"plugin {SVF_ID} no encontrado en {path}")
+            raise RuntimeError(f"plugin {unique_id} no encontrado en {path}")
         self._desc_ptr = desc_ptr
         desc = desc_ptr.contents
 
@@ -96,37 +90,91 @@ class LadspaSVF:
         if desc.activate:
             activate = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(desc.activate)
             activate(self._handle)
+        self._controls: dict[int, ctypes.c_float] = {}
 
-        # Puertos de control como floats persistentes
-        self._type = ctypes.c_float(1.0)       # LP
-        self._freq = ctypes.c_float(440.0)
-        self._q = ctypes.c_float(0.25)
-        self._res = ctypes.c_float(0.0)
-        self._connect(self._handle, SVF_TYPE, ctypes.byref(self._type))
-        self._connect(self._handle, SVF_FREQ, ctypes.byref(self._freq))
-        self._connect(self._handle, SVF_Q, ctypes.byref(self._q))
-        self._connect(self._handle, SVF_RES, ctypes.byref(self._res))
+    def set_control(self, port: int, value: float):
+        f = self._controls.get(port)
+        if f is None:
+            f = ctypes.c_float(float(value))
+            self._controls[port] = f
+            self._connect(self._handle, port, ctypes.byref(f))
+        else:
+            f.value = float(value)
+
+    def run(self, buf: np.ndarray, in_port: int, out_port: int):
+        data = buf.ctypes.data_as(ctypes.c_void_p)
+        self._connect(self._handle, in_port, data)
+        self._connect(self._handle, out_port, data)
+        self._run(self._handle, len(buf))
+
+
+class LadspaSVF(LadspaPlugin):
+    """State Variable Filter (svf_1214.so) para un canal de audio."""
+
+    def __init__(self, sample_rate: int, path: str = SVF_PATH):
+        super().__init__(path, SVF_ID, sample_rate)
+        self.set_control(SVF_TYPE, 1.0)        # LP
+        self.set_control(SVF_Q, 0.25)
 
     def set(self, freq_hz: float | None = None, res: float | None = None):
         if freq_hz is not None:
-            self._freq.value = float(min(max(freq_hz, 0.0), 6000.0))
+            self.set_control(SVF_FREQ, min(max(freq_hz, 0.0), 6000.0))
         if res is not None:
-            self._res.value = float(min(max(res, 0.0), 1.0))
+            self.set_control(SVF_RES, min(max(res, 0.0), 1.0))
 
     def run(self, buf: np.ndarray):
-        """Procesa un buffer mono float32 contiguo in-place."""
-        data = buf.ctypes.data_as(ctypes.c_void_p)
-        self._connect(self._handle, SVF_INPUT, data)
-        self._connect(self._handle, SVF_OUTPUT, data)
-        self._run(self._handle, len(buf))
+        super().run(buf, SVF_INPUT, SVF_OUTPUT)
+
+
+CAPS_PATH = "/usr/lib/ladspa/caps.so"
+CAPS_AUTOFILTER_ID = 2593
+
+# Puertos del C* AutoFilter
+AF_MODE = 0
+AF_FILTER = 1
+AF_FREQ = 2             # 20-3800 Hz (log)
+AF_Q = 3                # 0-1
+AF_DEPTH = 4
+AF_LFOENV = 5           # 0 = cutoff manual
+AF_RATE = 6
+AF_SHAPE = 7
+AF_INPUT = 8
+AF_OUTPUT = 9
+
+
+class LadspaAutoFilter(LadspaPlugin):
+    """C* AutoFilter (caps.so): filtro resonante auto-modulado.
+
+    Configurado como filtro acid manual: la envolvente/LFO no modula
+    (lfo/env = 0); el cutoff lo controla el pot."""
+
+    def __init__(self, sample_rate: int, path: str = CAPS_PATH):
+        super().__init__(path, CAPS_AUTOFILTER_ID, sample_rate)
+        self.set_control(AF_MODE, 1.0)
+        self.set_control(AF_FILTER, 1.0)
+        self.set_control(AF_DEPTH, 1.0)
+        self.set_control(AF_LFOENV, 0.0)
+        self.set_control(AF_RATE, 0.25)
+        self.set_control(AF_SHAPE, 1.0)
+
+    def set(self, freq_hz: float | None = None, res: float | None = None):
+        if freq_hz is not None:
+            self.set_control(AF_FREQ, min(max(freq_hz, 20.0), 3800.0))
+        if res is not None:
+            self.set_control(AF_Q, min(max(res, 0.0), 1.0))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, AF_INPUT, AF_OUTPUT)
 
 
 class LadspaStereoSVF:
     """Dos instancias mono para el buffer estéreo del canal."""
 
+    _PLUGIN = LadspaSVF
+
     def __init__(self, sample_rate: int):
-        self.left = LadspaSVF(sample_rate)
-        self.right = LadspaSVF(sample_rate)
+        self.left = self._PLUGIN(sample_rate)
+        self.right = self._PLUGIN(sample_rate)
 
     def set(self, freq_hz: float | None = None, res: float | None = None):
         self.left.set(freq_hz, res)
@@ -140,6 +188,12 @@ class LadspaStereoSVF:
         right = np.ascontiguousarray(buf[:, 1])
         self.right.run(right)
         buf[:, 1] = right
+
+
+class LadspaStereoAutoFilter(LadspaStereoSVF):
+    """C* AutoFilter estéreo (filtro acid del canal de bajo)."""
+
+    _PLUGIN = LadspaAutoFilter
 
 
 if __name__ == "__main__":

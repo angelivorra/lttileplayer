@@ -791,11 +791,15 @@ class Engine:
         freq = 80.0 * (75.0 ** cut)              # 80 Hz .. 6 kHz
         res = 0.95 * ch.lp_res
         if ch.lp_ladspa is None:
-            try:
-                from ladspa_fx import LadspaStereoSVF
-                ch.lp_ladspa = LadspaStereoSVF(self.sr)
-            except Exception:
-                ch.lp_ladspa = False        # sin plugin: biquad propio
+            # Preferencia: C* AutoFilter (acid) > SVF > biquad propio
+            ch.lp_ladspa = False
+            for cls in ("LadspaStereoAutoFilter", "LadspaStereoSVF"):
+                try:
+                    mod = __import__("ladspa_fx")
+                    ch.lp_ladspa = getattr(mod, cls)(self.sr)
+                    break
+                except Exception:
+                    continue
         if ch.lp_ladspa:
             ch.lp_ladspa.set(freq_hz=freq, res=res)
             ch.lp_ladspa.run(buf)
