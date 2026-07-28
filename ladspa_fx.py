@@ -91,6 +91,14 @@ class LadspaPlugin:
             activate = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(desc.activate)
             activate(self._handle)
         self._controls: dict[int, ctypes.c_float] = {}
+        # Conecta TODOS los puertos de control de entrada a 0.0: un plugin
+        # puede leerlos aunque no los usemos (puntero colgado = segfault)
+        LADSPA_PORT_INPUT = 0x1
+        LADSPA_PORT_CONTROL = 0x4
+        for port in range(desc.PortCount):
+            flags = desc.PortDescriptors[port]
+            if flags & LADSPA_PORT_INPUT and flags & LADSPA_PORT_CONTROL:
+                self.set_control(port, 0.0)
 
     def set_control(self, port: int, value: float):
         f = self._controls.get(port)
@@ -367,6 +375,52 @@ class LadspaStereoSatan:
     def set(self, knee_db: float):
         self.left.set(knee_db)
         self.right.set(knee_db)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
+
+
+RINGMOD_PATH = "/usr/lib/ladspa/ringmod_1188.so"
+RINGMOD_ID = 1189
+
+# Puertos del Ringmod with LFO
+RM_DEPTH = 0            # 0=none, 1=AM, 2=RM
+RM_FREQ = 1             # 1-1000 Hz
+RM_SINE = 2
+RM_INPUT = 6
+RM_OUTPUT = 7
+
+
+class LadspaRingmod(LadspaPlugin):
+    """Ringmod with LFO (swh): textura robótica/metálica."""
+
+    def __init__(self, sample_rate: int, path: str = RINGMOD_PATH):
+        super().__init__(path, RINGMOD_ID, sample_rate)
+        self.set_control(RM_SINE, 1.0)
+
+    def set(self, depth: float, freq_hz: float):
+        self.set_control(RM_DEPTH, min(max(depth, 0.0), 2.0))
+        self.set_control(RM_FREQ, min(max(freq_hz, 1.0), 1000.0))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, RM_INPUT, RM_OUTPUT)
+
+
+class LadspaStereoRingmod:
+    """Dos instancias mono para el buffer estéreo del canal."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaRingmod(sample_rate)
+        self.right = LadspaRingmod(sample_rate)
+
+    def set(self, depth: float, freq_hz: float):
+        self.left.set(depth, freq_hz)
+        self.right.set(depth, freq_hz)
 
     def run(self, buf: np.ndarray):
         left = np.ascontiguousarray(buf[:, 0])

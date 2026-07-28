@@ -655,11 +655,36 @@ class SatanFx:
             np.tanh(buf, out=buf)
 
 
+class RingmodFx:
+    """Ringmod with LFO: depth 0 = bypass; al subir entra la modulación
+    en anillo con la frecuencia barriendo 30 -> 330 Hz (zona metálica).
+    No sube el nivel."""
+
+    def __init__(self, sr: int):
+        try:
+            from ladspa_fx import LadspaStereoRingmod
+            self.plugin = LadspaStereoRingmod(sr)
+        except Exception:
+            self.plugin = None
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if self.plugin is not None:
+            self.plugin.set(2.0 * amount, 30.0 + 300.0 * amount)
+            self.plugin.run(buf)
+        else:
+            # fallback: tremolo rápido aproximado
+            n = np.arange(len(buf), dtype=np.float32)
+            mod = 1.0 - amount * (0.5 + 0.5 * np.sin(
+                2 * np.pi * (30 + 300 * amount) * n / 44100))
+            buf *= mod[:, None]
+
+
 # Presets disponibles para los pots (target = "canal:nombre"). El orden
 # de este dict es el orden de la cadena: suboctava/drive -> filtro.
 EFFECT_PRESETS = {
     "suboctave": SuboctaveFx,
     "satan": SatanFx,
+    "ringmod": RingmodFx,
     "acid_lp": AcidLpFx,
 }
 
