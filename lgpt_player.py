@@ -516,7 +516,6 @@ class Player:
         engine = Engine(project_dir, sample_rate=self.args.samplerate,
                         audio_delay=self.args.delay,
                         wavs_dir=self.args.wavs_dir)
-        engine.pad_volume = self.args.pad_volume
         engine.midi_out = self.midi_out
         engine.start()
         self._apply_song_config(project_dir, engine)
@@ -536,6 +535,14 @@ class Player:
             except (OSError, json.JSONDecodeError) as exc:
                 print(f"[config] {cfg_file.name}: {exc}")
         engine.muted = set(song_cfg.get("mute", []))
+        # volumen de pads: número (todos) o dict por pad {"2": 40}
+        pv = song_cfg.get("pad_volume", self.args.pad_volume)
+        if isinstance(pv, dict):
+            engine.pad_volume_map = {
+                int(k) - 1: float(v) / 100 for k, v in pv.items()}
+        else:
+            engine.pad_volume_map = {}
+            engine.pad_volume_default = float(pv) / 100
         # targets por canción sobre el mapeo físico global de knobs
         song_pots = song_cfg.get("pots", {})
         self.args.pots.clear()
