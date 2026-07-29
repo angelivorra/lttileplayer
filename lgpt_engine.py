@@ -746,7 +746,7 @@ class Channel:
         "cc_vol", "cc_pan", "cc_pitch", "cc_cutoff",
         "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
         "groove", "g_pos", "g_ticks",
-        "fx_amounts", "fx_objs", "fx_smooth",
+        "fx_amounts", "fx_objs",
     )
 
     def __init__(self, idx: int):
@@ -779,8 +779,7 @@ class Channel:
         self.g_pos = 0                         # paso dentro del groove
         self.g_ticks = 6                       # cuenta atrás de ticks del paso
         # Efectos live del canal (presets LADSPA): nombre -> cantidad 0-1
-        self.fx_amounts: dict[str, float] = {}   # objetivo (pot)
-        self.fx_smooth: dict[str, float] = {}    # valor suavizado (~80 ms)
+        self.fx_amounts: dict[str, float] = {}
         self.fx_objs: dict[str, object] = {}
 
 
@@ -953,19 +952,13 @@ class Engine:
         for ch in self.channels:
             block = self._delay_channel(ch, self._stage[ch.idx][:frames])
             for name, cls in EFFECT_PRESETS.items():
-                target = ch.fx_amounts.get(name, 0.0)
-                cur = ch.fx_smooth.get(name, 0.0)
-                if target != cur:
-                    # slew ~80 ms: los cambios de pot se sienten suaves
-                    alpha = min(1.0, frames / (0.08 * self.sr))
-                    cur += (target - cur) * alpha
-                    ch.fx_smooth[name] = cur
-                if cur > 0.001:
+                amount = ch.fx_amounts.get(name, 0.0)
+                if amount > 0.001:
                     fx = ch.fx_objs.get(name)
                     if fx is None:
                         fx = cls(self.sr)
                         ch.fx_objs[name] = fx
-                    fx.apply(block, cur)
+                    fx.apply(block, amount)
             if ch.cc_vol != 1.0:
                 block *= ch.cc_vol
             if ch.cc_pan is not None:
