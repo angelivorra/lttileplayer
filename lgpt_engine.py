@@ -679,12 +679,33 @@ class RingmodFx:
             buf *= mod[:, None]
 
 
+class PhaserFx:
+    """LFO Phaser: depth 0 = seco; al subir entra el phaser con feedback
+    y rate 0.2 -> 1.7 Hz. No toca el nivel."""
+
+    def __init__(self, sr: int):
+        try:
+            from ladspa_fx import LadspaStereoPhaser
+            self.plugin = LadspaStereoPhaser(sr)
+        except Exception:
+            self.plugin = None
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if self.plugin is not None:
+            self.plugin.set(0.2 + 1.5 * amount, amount, 0.6 * amount)
+            self.plugin.run(buf)
+            # el phaser colorea incluso a depth 0 (~1.4x) y sube con el
+            # feedback: compensación para mantener el nivel
+            buf *= 1.0 / (1.4 + amount)
+
+
 # Presets disponibles para los pots (target = "canal:nombre"). El orden
 # de este dict es el orden de la cadena: suboctava/drive -> filtro.
 EFFECT_PRESETS = {
     "suboctave": SuboctaveFx,
     "satan": SatanFx,
     "ringmod": RingmodFx,
+    "phaser": PhaserFx,
     "acid_lp": AcidLpFx,
 }
 

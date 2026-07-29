@@ -431,6 +431,54 @@ class LadspaStereoRingmod:
         buf[:, 1] = right
 
 
+PHASER_PATH = "/usr/lib/ladspa/phasers_1217.so"
+PHASER_ID = 1217
+
+# Puertos del LFO Phaser
+PH_RATE = 0             # 0-100 Hz
+PH_DEPTH = 1            # 0-1 (0 = seco)
+PH_FEEDBACK = 2         # -1 a 1
+PH_SPREAD = 3           # 0-2 octavas
+PH_INPUT = 4
+PH_OUTPUT = 5
+
+
+class LadspaPhaser(LadspaPlugin):
+    """LFO Phaser (swh): movimiento sin tocar el nivel."""
+
+    def __init__(self, sample_rate: int, path: str = PHASER_PATH):
+        super().__init__(path, PHASER_ID, sample_rate)
+        self.set_control(PH_SPREAD, 1.0)
+
+    def set(self, rate: float, depth: float, feedback: float):
+        self.set_control(PH_RATE, min(max(rate, 0.0), 100.0))
+        self.set_control(PH_DEPTH, min(max(depth, 0.0), 1.0))
+        self.set_control(PH_FEEDBACK, min(max(feedback, -1.0), 1.0))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, PH_INPUT, PH_OUTPUT)
+
+
+class LadspaStereoPhaser:
+    """Dos instancias mono para el buffer estéreo del canal."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaPhaser(sample_rate)
+        self.right = LadspaPhaser(sample_rate)
+
+    def set(self, rate: float, depth: float, feedback: float):
+        self.left.set(rate, depth, feedback)
+        self.right.set(rate, depth, feedback)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100
