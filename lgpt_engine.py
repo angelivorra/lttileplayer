@@ -722,12 +722,48 @@ class DecimatorFx:
             buf[:] = np.round(buf / step) * step
 
 
+class ChopperFx:
+    """Tremolo/gate con LFO cuadrado (Ringmod with LFO): depth 0 = bypass;
+    al subir, corte afilado de 2 a 16 Hz. No sube el nivel."""
+
+    def __init__(self, sr: int):
+        try:
+            from ladspa_fx import LadspaRingmod
+            self.left = LadspaRingmod(sr)
+            self.right = LadspaRingmod(sr)
+            for p in (self.left, self.right):
+                p.set_control(2, 0.0)      # sine off
+                p.set_control(5, 1.0)      # square on
+            self.ok = True
+        except Exception:
+            self.ok = False
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if self.ok:
+            rate = 2.0 + 14.0 * amount
+            for p in (self.left, self.right):
+                p.set(2.0 * amount, rate)
+            left = np.ascontiguousarray(buf[:, 0])
+            self.left.run(left)
+            buf[:, 0] = left
+            right = np.ascontiguousarray(buf[:, 1])
+            self.right.run(right)
+            buf[:, 1] = right
+        else:
+            # fallback: tremolo cuadrado propio
+            n = np.arange(len(buf), dtype=np.float32)
+            rate = 2.0 + 14.0 * amount
+            mod = (np.sin(2 * np.pi * rate * n / 44100) > 0)
+            buf *= (1.0 - amount + amount * mod)[:, None]
+
+
 # Presets disponibles para los pots (target = "canal:nombre"). El orden
 # de este dict es el orden de la cadena: suboctava/drive -> filtro.
 EFFECT_PRESETS = {
     "suboctave": SuboctaveFx,
     "satan": SatanFx,
     "ringmod": RingmodFx,
+    "chopper": ChopperFx,
     "phaser": PhaserFx,
     "decimator": DecimatorFx,
     "acid_lp": AcidLpFx,
