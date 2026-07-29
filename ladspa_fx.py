@@ -479,6 +479,51 @@ class LadspaStereoPhaser:
         buf[:, 1] = right
 
 
+DECIMATOR_PATH = "/usr/lib/ladspa/decimator_1202.so"
+DECIMATOR_ID = 1202
+
+# Puertos del Decimator
+DEC_BITS = 0            # 1-24 (24 = limpio)
+DEC_RATE = 1            # Hz (srate = limpio)
+DEC_INPUT = 2
+DEC_OUTPUT = 3
+
+
+class LadspaDecimator(LadspaPlugin):
+    """Decimator (swh): bitcrush — profundidad de bits y sample rate."""
+
+    def __init__(self, sample_rate: int, path: str = DECIMATOR_PATH):
+        super().__init__(path, DECIMATOR_ID, sample_rate)
+        self._sr = sample_rate
+
+    def set(self, bits: float, rate_hz: float):
+        self.set_control(DEC_BITS, min(max(bits, 1.0), 24.0))
+        self.set_control(DEC_RATE, min(max(rate_hz, 1.0), float(self._sr)))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, DEC_INPUT, DEC_OUTPUT)
+
+
+class LadspaStereoDecimator:
+    """Dos instancias mono para el buffer estéreo del canal."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaDecimator(sample_rate)
+        self.right = LadspaDecimator(sample_rate)
+
+    def set(self, bits: float, rate_hz: float):
+        self.left.set(bits, rate_hz)
+        self.right.set(bits, rate_hz)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100

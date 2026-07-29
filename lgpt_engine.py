@@ -699,6 +699,31 @@ class PhaserFx:
             buf *= 1.0 / (1.4 + amount)
 
 
+class DecimatorFx:
+    """Decimator: 24 bits + rate full = limpio; al subir baja la
+    profundidad de bits (hasta 6) y el sample rate (hasta 30%). Lo-fi
+    sin subir el nivel."""
+
+    def __init__(self, sr: int):
+        self.sr = sr
+        try:
+            from ladspa_fx import LadspaStereoDecimator
+            self.plugin = LadspaStereoDecimator(sr)
+        except Exception:
+            self.plugin = None
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if self.plugin is not None:
+            self.plugin.set(24.0 - 18.0 * amount,
+                            self.sr * (1.0 - 0.7 * amount))
+            self.plugin.run(buf)
+        else:
+            # fallback: cuantización de bits propia
+            bits = max(1.0, 24.0 - 18.0 * amount)
+            step = 2.0 ** (1.0 - bits)
+            buf[:] = np.round(buf / step) * step
+
+
 # Presets disponibles para los pots (target = "canal:nombre"). El orden
 # de este dict es el orden de la cadena: suboctava/drive -> filtro.
 EFFECT_PRESETS = {
@@ -706,6 +731,7 @@ EFFECT_PRESETS = {
     "satan": SatanFx,
     "ringmod": RingmodFx,
     "phaser": PhaserFx,
+    "decimator": DecimatorFx,
     "acid_lp": AcidLpFx,
 }
 
