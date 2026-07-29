@@ -524,6 +524,58 @@ class LadspaStereoDecimator:
         buf[:, 1] = right
 
 
+TAPE_DELAY_PATH = "/usr/lib/ladspa/tape_delay_1211.so"
+TAPE_DELAY_ID = 1211
+
+# Puertos del Tape Delay Simulation
+TD_SPEED = 0            # pulgadas/s (1 = normal)
+TD_DRY = 1              # dB (-90 = off, 0 = full)
+TD_T1_DIST = 2
+TD_T1_LVL = 3
+TD_T2_DIST = 4
+TD_T2_LVL = 5
+TD_INPUT = 10
+TD_OUTPUT = 11
+
+
+class LadspaTapeDelay(LadspaPlugin):
+    """Tape Delay Simulation (swh): eco de cinta con 2 taps."""
+
+    def __init__(self, sample_rate: int, path: str = TAPE_DELAY_PATH):
+        super().__init__(path, TAPE_DELAY_ID, sample_rate)
+        self.set_control(TD_SPEED, 1.0)
+        self.set_control(TD_T1_DIST, 1.5)
+        self.set_control(TD_T2_DIST, 3.0)
+        self.set_control(TD_T2_LVL, -90.0)
+
+    def set(self, dry_db: float, tap_db: float):
+        self.set_control(TD_DRY, min(max(dry_db, -90.0), 0.0))
+        self.set_control(TD_T1_LVL, min(max(tap_db, -90.0), 0.0))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, TD_INPUT, TD_OUTPUT)
+
+
+class LadspaStereoTapeDelay:
+    """Dos instancias mono para el buffer estéreo del canal."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaTapeDelay(sample_rate)
+        self.right = LadspaTapeDelay(sample_rate)
+
+    def set(self, dry_db: float, tap_db: float):
+        self.left.set(dry_db, tap_db)
+        self.right.set(dry_db, tap_db)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100

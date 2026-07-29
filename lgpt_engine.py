@@ -757,6 +757,23 @@ class ChopperFx:
             buf *= (1.0 - amount + amount * mod)[:, None]
 
 
+class TapeDelayFx:
+    """Tape Delay: 0 = seco puro; al subir entra el eco (tap 1 a -6 dB,
+    dry baja 2 dB para no inflar la mezcla)."""
+
+    def __init__(self, sr: int):
+        try:
+            from ladspa_fx import LadspaStereoTapeDelay
+            self.plugin = LadspaStereoTapeDelay(sr)
+        except Exception:
+            self.plugin = None
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if self.plugin is not None:
+            self.plugin.set(-2.0 * amount, -90.0 + 84.0 * amount)
+            self.plugin.run(buf)
+
+
 # Presets disponibles para los pots (target = "canal:nombre"). El orden
 # de este dict es el orden de la cadena: suboctava/drive -> filtro.
 EFFECT_PRESETS = {
@@ -766,6 +783,7 @@ EFFECT_PRESETS = {
     "chopper": ChopperFx,
     "phaser": PhaserFx,
     "decimator": DecimatorFx,
+    "tape_delay": TapeDelayFx,
     "acid_lp": AcidLpFx,
 }
 
