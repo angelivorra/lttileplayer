@@ -700,9 +700,9 @@ class PhaserFx:
 
 
 class DecimatorFx:
-    """Decimator: 24 bits + rate full = limpio; al subir baja la
-    profundidad de bits (hasta 6) y el sample rate (hasta 30%). Lo-fi
-    sin subir el nivel."""
+    """Decimator: textura fija de 16 bits y barrido SUAVE del sample rate
+    (100% -> 20%). La profundidad de bits es entera en el plugin (a
+    pasos), así que el barrido principal va por el rate, que es continuo."""
 
     def __init__(self, sr: int):
         self.sr = sr
@@ -713,13 +713,11 @@ class DecimatorFx:
             self.plugin = None
 
     def apply(self, buf: np.ndarray, amount: float):
+        bits = 24.0 - 8.0 * amount                # 24 -> 16 (textura leve)
         if self.plugin is not None:
-            self.plugin.set(24.0 - 18.0 * amount,
-                            self.sr * (1.0 - 0.7 * amount))
+            self.plugin.set(bits, self.sr * (1.0 - 0.8 * amount))
             self.plugin.run(buf)
         else:
-            # fallback: cuantización de bits propia
-            bits = max(1.0, 24.0 - 18.0 * amount)
             step = 2.0 ** (1.0 - bits)
             buf[:] = np.round(buf / step) * step
 
@@ -748,7 +746,7 @@ class Channel:
         "cc_vol", "cc_pan", "cc_pitch", "cc_cutoff",
         "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
         "groove", "g_pos", "g_ticks",
-        "fx_amounts", "fx_objs",
+        "fx_amounts", "fx_objs", "fx_smooth",
     )
 
     def __init__(self, idx: int):
@@ -781,7 +779,8 @@ class Channel:
         self.g_pos = 0                         # paso dentro del groove
         self.g_ticks = 6                       # cuenta atrás de ticks del paso
         # Efectos live del canal (presets LADSPA): nombre -> cantidad 0-1
-        self.fx_amounts: dict[str, float] = {}
+        self.fx_amounts: dict[str, float] = {}   # objetivo (pot)
+        self.fx_smooth: dict[str, float] = {}    # valor suavizado (~80 ms)
         self.fx_objs: dict[str, object] = {}
 
 
@@ -954,13 +953,19 @@ class Engine:
         for ch in self.channels:
             block = self._delay_channel(ch, self._stage[ch.idx][:frames])
             for name, cls in EFFECT_PRESETS.items():
-                amount = ch.fx_amounts.get(name, 0.0)
-                if amount > 0.001:
+                target = ch.fx_amounts.get(name, 0.0)
+                cur = ch.fx_smooth.get(name, 0.0)
+                if target != cur:
+                    # slew ~80 ms: los cambios de pot se sienten suaves
+                    alpha = min(1.0, frames / (0.08 * self.sr))
+                    cur += (target - cur) * alpha
+                    ch.fx_smooth[name] = cur
+                if cur > 0.001:
                     fx = ch.fx_objs.get(name)
                     if fx is None:
                         fx = cls(self.sr)
                         ch.fx_objs[name] = fx
-                    fx.apply(block, amount)
+                    fx.apply(block, cur)
             if ch.cc_vol != 1.0:
                 block *= ch.cc_vol
             if ch.cc_pan is not None:

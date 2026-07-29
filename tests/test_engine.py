@@ -233,17 +233,21 @@ class TestVoices(unittest.TestCase):
     def test_lp_filter(self):
         # acid_lp es cantidad de efecto: 127 = filtro al 50% del
         # recorrido (~780 Hz); con una nota aguda (1760 Hz) debe atenuar,
-        # y a 0 es bypass
+        # y a 0 es bypass. El suavizado se salta fijando fx_smooth.
         engine = make_engine()
         note_row(engine.project, 0, note=84)   # 440 Hz * 4 = 1760 Hz
         engine._process_tick()
         open_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
         engine.push_event("param", 0, "acid_lp", 127)
-        engine.render(2048)                  # deja asentar el filtro
+        engine._drain_events()
+        engine.channels[0].fx_smooth["acid_lp"] = 1.0
+        engine.render(2048)
         lp_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
         self.assertGreater(open_rms, 0.01)
         self.assertLess(lp_rms, open_rms * 0.5)
         engine.push_event("param", 0, "acid_lp", 0)
+        engine._drain_events()
+        engine.channels[0].fx_smooth["acid_lp"] = 0.0
         engine.render(2048)
         bypass_rms = float(np.sqrt((engine.render(2048) ** 2).mean()))
         self.assertGreater(bypass_rms, open_rms * 0.5)
