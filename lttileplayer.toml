@@ -8,7 +8,8 @@ output = "IQaudIODAC"
 samplerate = 44100
 blocksize = 512
 delay = 1.0
-record = "/home/angel/robotraca.wav"
+record = ""
+wavs_dir = "/home/angel/lttileplayer/wavs"
 stream = 5050
 
 [midi]
@@ -17,7 +18,7 @@ output = "Midi Through"
 
 [channels]
 # Canales silenciados siempre (índice 0-7; 3 = pista 4).
-mute = [3, 4, 6, 7]
+mute = [3, 7]
 
 [buttons]
 # Botones del controlador: "note:canal:nota" o "cc:canal:control",
@@ -26,6 +27,10 @@ up = "note:9:40"
 down = "note:9:36"
 play = "note:9:41"
 stop = "note:9:37"
+sample1 = "note:9:38"
+sample2 = "note:9:43"
+sample3 = "note:9:39"
+sample4 = "note:9:42"
 
 [pots]
 # Potenciómetros: cc = "cc:canal:control" (capturado aquí),
@@ -35,7 +40,7 @@ pot1 = { cc = "cc:0:70", target = "2:suboctave" }
 pot2 = { cc = "cc:0:71", target = "5:chopper" }
 pot3 = { cc = "cc:0:72", target = "" }
 pot4 = { cc = "cc:0:73", target = "" }
-pot5 = { cc = "cc:0:74", target = "2:acid_lp" }
-pot6 = { cc = "cc:0:75", target = "5:tape_delay" }
+pot5 = { cc = "cc:0:74", target = "" }
+pot6 = { cc = "cc:0:75", target = "" }
 pot7 = { cc = "cc:0:76", target = "" }
 pot8 = { cc = "cc:0:77", target = "" }

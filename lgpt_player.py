@@ -307,7 +307,17 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
         # Los botones mapeados tienen prioridad sobre pots y CC
         action = match_button(buttons, msg)
         if action is not None:
-            ui_queue.put(action)
+            if action.startswith("sample"):
+                # pads sampler: disparan WAVs del banco (sample1 -> 001.wav)
+                engine = engine_ref.get("engine")
+                if engine is not None:
+                    try:
+                        idx = int(action[6:]) - 1
+                    except ValueError:
+                        idx = 0
+                    engine.push_event("trigger", idx)
+            else:
+                ui_queue.put(action)
             return
         engine = engine_ref.get("engine")
         if engine is None:
@@ -505,12 +515,37 @@ class Player:
         if old is not None:
             old.panic()                   # note off de notas MIDI colgadas
         engine = Engine(project_dir, sample_rate=self.args.samplerate,
-                        audio_delay=self.args.delay)
-        engine.muted = set(self.args.mute)
+                        audio_delay=self.args.delay,
+                        wavs_dir=self.args.wavs_dir)
         engine.midi_out = self.midi_out
         engine.start()
+        self._apply_song_config(project_dir, engine)
         self.engine_ref["engine"] = engine   # swap atómico de referencia
         return engine
+
+    def _apply_song_config(self, project_dir: Path, engine: Engine):
+        """Config por canción (robotraca.json en la carpeta del proyecto):
+        mute de canales y targets de los knobs (canal:efecto).
+        Sin JSON: sin mute y sin efectos."""
+        import json
+        cfg_file = project_dir / "robotraca.json"
+        song_cfg = {}
+        if cfg_file.is_file():
+            try:
+                song_cfg = json.loads(cfg_file.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"[config] {cfg_file.name}: {exc}")
+        engine.muted = set(song_cfg.get("mute", []))
+        # targets por canción sobre el mapeo físico global de knobs
+        song_pots = song_cfg.get("pots", {})
+        self.args.pots.clear()
+        for key, entry in self.args.hw_pots.items():
+            if not isinstance(entry, dict):
+                continue
+            spec = parse_button_spec(entry.get("cc", ""))
+            target = parse_pot_target(song_pots.get(key, ""))
+            if spec is not None and target is not None:
+                self.args.pots.append((spec, target))
 
     # -- UI curses --------------------------------------------------------------
 
@@ -858,21 +893,12 @@ class Player:
             time.sleep(0.05)
 
     def _apply_live_config(self, cfg: dict):
-        """Botones y pots se aplican en caliente tras guardar."""
+        """Botones y mapeo físico de knobs se aplican en caliente."""
         self.buttons.clear()
         self.buttons.update({
             a: parse_button_spec(s)
             for a, s in cfg.get("buttons", {}).items()})
-        self.args.pots.clear()
-        for key, entry in cfg.get("pots", {}).items():
-            if isinstance(entry, dict):
-                spec = parse_button_spec(entry.get("cc", ""))
-                target = parse_pot_target(entry.get("target", ""))
-            else:
-                spec = parse_button_spec(entry)
-                target = (None, key) if spec else None
-            if spec is not None and target is not None:
-                self.args.pots.append((spec, target))
+        self.args.hw_pots = cfg.get("pots", {})
 
     # -- widgets de la pantalla CONFIG ------------------------------------------
 
@@ -1114,19 +1140,10 @@ def main():
         action: parse_button_spec(spec)
         for action, spec in cfg.get("buttons", {}).items()
     }
+    args.hw_pots = cfg.get("pots", {})     # mapeo físico global (CC por knob)
+    args.pots = []                          # targets (se arman por canción)
     args.mute = cfg.get("channels", {}).get("mute", [])
-    args.pots = []
-    for key, entry in cfg.get("pots", {}).items():
-        if isinstance(entry, dict):
-            # potN = { cc = "cc:canal:control", target = "canal:parametro" }
-            spec = parse_button_spec(entry.get("cc", ""))
-            target = parse_pot_target(entry.get("target", ""))
-        else:
-            # formato antiguo: param = "cc:canal:control" (canal via MIDI ch)
-            spec = parse_button_spec(entry)
-            target = (None, key) if spec else None
-        if spec is not None and target is not None:
-            args.pots.append((spec, target))
+    args.wavs_dir = audio_cfg.get("wavs_dir") or None
 
     Player(args).run()
 

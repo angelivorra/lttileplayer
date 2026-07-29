@@ -264,6 +264,21 @@ class TestVoices(unittest.TestCase):
         self.assertGreater(rms_clean, 0.01)
         self.assertNotAlmostEqual(rms_clean, rms_driven, places=3)
 
+    def test_pad_sample(self, tmp_dir=None):
+        # pad sampler: dispara un WAV del banco (directo, sin delay)
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sf_write = __import__("soundfile").write
+            t = np.arange(22050, dtype=np.float32) / SAMPLE_RATE
+            sig = (0.4 * np.sin(2 * np.pi * 220 * t))[:, None]
+            sf_write(str(Path(d) / "001.wav"), sig, SAMPLE_RATE,
+                     subtype="PCM_16")
+            engine = Engine(make_project(), wavs_dir=d)
+            engine.start()
+            engine.push_event("trigger", 0)
+            out = engine.render(512)
+            self.assertGreater(float(np.abs(out).max()), 0.01)
+
     def test_satan_preset(self):
         engine = make_engine()
         note_row(engine.project, 0)

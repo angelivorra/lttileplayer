@@ -852,7 +852,7 @@ class Engine:
     """
 
     def __init__(self, project, sample_rate: int = SAMPLE_RATE,
-                 audio_delay: float = 0.0):
+                 audio_delay: float = 0.0, wavs_dir: str | None = None):
         if not isinstance(project, LGPTProject):
             project = LGPTProject(Path(project))
         if project.root is None:
@@ -905,6 +905,21 @@ class Engine:
         self._rings: list[Optional[np.ndarray]] = [None] * CHANNEL_COUNT
         self._ring_pos = [0] * CHANNEL_COUNT
         self.set_audio_delay(audio_delay)
+        # Banco de WAVs para los pads (001.wav -> pad 0, 002.wav -> pad 1...)
+        self.pad_samples: list[tuple[np.ndarray, int]] = []
+        self.pad_voice: Optional[Voice] = None
+        if wavs_dir:
+            self._load_pad_samples(Path(wavs_dir))
+
+    def _load_pad_samples(self, wavs_dir: Path):
+        if not wavs_dir.is_dir():
+            return
+        for wav in sorted(wavs_dir.glob("*.wav")):
+            try:
+                data, sr = sf.read(str(wav), dtype="float32", always_2d=True)
+                self.pad_samples.append((np.ascontiguousarray(data), sr))
+            except Exception as exc:
+                print(f"[engine] pad {wav.name}: {exc}")
 
     def set_audio_delay(self, seconds: float):
         """Configura el retardo de la salida de audio (0 = sin delay)."""
@@ -1020,6 +1035,13 @@ class Engine:
                 block[:, 0] *= min(1.0, 2.0 * (1.0 - x))
                 block[:, 1] *= min(1.0, 2.0 * x)
             out += block
+        # Pad sampler: suena directo (sin delay ni FX de canal)
+        pv = self.pad_voice
+        if pv is not None:
+            if pv.active:
+                pv.render(out, 0, frames)
+            if not pv.active:
+                self.pad_voice = None
         out *= self.master
         np.clip(out, -1.0, 1.0, out=out)
         return out
@@ -1059,6 +1081,8 @@ class Engine:
                 self._apply_cc(ev[1], ev[2], ev[3])
             elif kind == "param":
                 self._apply_param(ev[1], ev[2], ev[3])
+            elif kind == "trigger":
+                self._trigger_pad(ev[1])
             elif kind == "play":
                 if self.finished:
                     self.start()
@@ -1324,6 +1348,17 @@ class Engine:
                 ch.table.start(self.project.tables[table])
             else:
                 ch.table.stop()
+
+    def _trigger_pad(self, idx: int):
+        """Pad sampler: dispara un WAV del banco de pads (wavs_dir),
+        independiente de la canción. Suena directo (sin delay)."""
+        if not 0 <= idx < len(self.pad_samples):
+            return
+        sample, sr = self.pad_samples[idx]
+        idef = InstrumentDef(
+            index=0, sample_name="", volume=220, pan=127, root_note=60)
+        self.pad_voice = Voice(Sample(sample, sr), idef, 60, self.sr,
+                               self.samples_per_tick)
 
     def _process_row_commands(self, ch: Channel):
         if not ch.playing or ch.phrase == 0xFF:
