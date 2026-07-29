@@ -908,6 +908,7 @@ class Engine:
         # Banco de WAVs para los pads (001.wav -> pad 0, 002.wav -> pad 1...)
         self.pad_samples: list[tuple[np.ndarray, int]] = []
         self.pad_voice: Optional[Voice] = None
+        self.pad_volume = 0.6               # volumen de los pads (0-1)
         if wavs_dir:
             self._load_pad_samples(Path(wavs_dir))
 
@@ -1356,7 +1357,8 @@ class Engine:
             return
         sample, sr = self.pad_samples[idx]
         idef = InstrumentDef(
-            index=0, sample_name="", volume=220, pan=127, root_note=60)
+            index=0, sample_name="", volume=int(255 * self.pad_volume),
+            pan=127, root_note=60)
         self.pad_voice = Voice(Sample(sample, sr), idef, 60, self.sr,
                                self.samples_per_tick)
 

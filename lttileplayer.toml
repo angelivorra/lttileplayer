@@ -10,6 +10,7 @@ blocksize = 512
 delay = 1.0
 record = ""
 wavs_dir = "/home/angel/lttileplayer/wavs"
+pad_volume = 60
 stream = 5050
 
 [midi]

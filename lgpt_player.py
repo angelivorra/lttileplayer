@@ -295,8 +295,6 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
     if chosen is None:
         return None
 
-    use_pots = bool(pots)
-
     def on_message(msg):
         rq = engine_ref.get("raw_queue")
         if rq is not None:
@@ -322,7 +320,8 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
         engine = engine_ref.get("engine")
         if engine is None:
             return
-        if use_pots:
+        # pots: la lista se rellena por canción; se evalúa EN CADA mensaje
+        if pots:
             hit = match_pot(pots, msg)
             if hit is not None:
                 tch, tparam = hit
@@ -517,6 +516,7 @@ class Player:
         engine = Engine(project_dir, sample_rate=self.args.samplerate,
                         audio_delay=self.args.delay,
                         wavs_dir=self.args.wavs_dir)
+        engine.pad_volume = self.args.pad_volume
         engine.midi_out = self.midi_out
         engine.start()
         self._apply_song_config(project_dir, engine)
@@ -1144,6 +1144,7 @@ def main():
     args.pots = []                          # targets (se arman por canción)
     args.mute = cfg.get("channels", {}).get("mute", [])
     args.wavs_dir = audio_cfg.get("wavs_dir") or None
+    args.pad_volume = audio_cfg.get("pad_volume", 60) / 100
 
     Player(args).run()
 
