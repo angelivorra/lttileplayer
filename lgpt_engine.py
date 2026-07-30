@@ -554,7 +554,8 @@ class TablePlayback:
 # --------------------------------------------------------------------------
 
 class SuboctaveFx:
-    """Audio Divider: suboctava del bajo (denominador 1 -> 4 al subir)."""
+    """Audio Divider: suboctava del bajo (denominador 1 -> 2 al subir,
+    una sola marcha: suboctava sutil)."""
 
     def __init__(self, sr: int):
         try:
@@ -565,7 +566,7 @@ class SuboctaveFx:
 
     def apply(self, buf: np.ndarray, amount: float):
         if self.plugin is not None:
-            self.plugin.set(1.0 + amount * 3.0)
+            self.plugin.set(1.0 + amount * 1.0)
             self.plugin.run(buf)
         else:
             np.tanh(buf * (1.0 + 20.0 * amount), out=buf)
