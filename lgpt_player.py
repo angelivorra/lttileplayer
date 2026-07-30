@@ -1151,7 +1151,7 @@ def main():
     args.pots = []                          # targets (se arman por canción)
     args.mute = cfg.get("channels", {}).get("mute", [])
     args.wavs_dir = audio_cfg.get("wavs_dir") or None
-    args.pad_volume = audio_cfg.get("pad_volume", 60) / 100
+    args.pad_volume = audio_cfg.get("pad_volume", 60)
 
     Player(args).run()
 

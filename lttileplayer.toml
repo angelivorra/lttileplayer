@@ -10,7 +10,7 @@ blocksize = 512
 delay = 1.0
 record = ""
 wavs_dir = "/home/angel/lttileplayer/wavs"
-pad_volume = 60
+pad_volume = 25
 stream = 5050
 
 [midi]
@@ -38,10 +38,10 @@ sample4 = "note:9:42"
 # target = "canal:parametro" (canal LGPT 0-7; parametro:
 # lp_cutoff, lp_res, volume, pan, pitch; "" = sin asignar).
 pot1 = { cc = "cc:0:70", target = "2:suboctave" }
-pot2 = { cc = "cc:0:71", target = "5:chopper" }
+pot2 = { cc = "cc:0:71", target = "5:flanger" }
 pot3 = { cc = "cc:0:72", target = "" }
 pot4 = { cc = "cc:0:73", target = "" }
-pot5 = { cc = "cc:0:74", target = "" }
-pot6 = { cc = "cc:0:75", target = "" }
+pot5 = { cc = "cc:0:74", target = "2:lp_res" }
+pot6 = { cc = "cc:0:75", target = "5:beat_delay" }
 pot7 = { cc = "cc:0:76", target = "" }
 pot8 = { cc = "cc:0:77", target = "" }

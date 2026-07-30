@@ -576,6 +576,50 @@ class LadspaStereoTapeDelay:
         buf[:, 1] = right
 
 
+RETRO_FLANGE_PATH = "/usr/lib/ladspa/retro_flange_1208.so"
+RETRO_FLANGE_ID = 1208
+
+# Puertos del Retro Flanger
+RF_STALL = 0            # ms, 0-10 (profundidad)
+RF_FREQ = 1             # Hz, 0.5-8
+RF_INPUT = 2
+RF_OUTPUT = 3
+
+
+class LadspaRetroFlange(LadspaPlugin):
+    """Retro Flanger (swh): barrido suave, sin distorsión ni pérdida de nivel."""
+
+    def __init__(self, sample_rate: int, path: str = RETRO_FLANGE_PATH):
+        super().__init__(path, RETRO_FLANGE_ID, sample_rate)
+
+    def set(self, stall_ms: float, freq_hz: float):
+        self.set_control(RF_STALL, min(max(stall_ms, 0.0), 10.0))
+        self.set_control(RF_FREQ, min(max(freq_hz, 0.5), 8.0))
+
+    def run(self, buf: np.ndarray):
+        super().run(buf, RF_INPUT, RF_OUTPUT)
+
+
+class LadspaStereoRetroFlange:
+    """Dos instancias mono para el buffer estéreo del canal."""
+
+    def __init__(self, sample_rate: int):
+        self.left = LadspaRetroFlange(sample_rate)
+        self.right = LadspaRetroFlange(sample_rate)
+
+    def set(self, stall_ms: float, freq_hz: float):
+        self.left.set(stall_ms, freq_hz)
+        self.right.set(stall_ms, freq_hz)
+
+    def run(self, buf: np.ndarray):
+        left = np.ascontiguousarray(buf[:, 0])
+        self.left.run(left)
+        buf[:, 0] = left
+        right = np.ascontiguousarray(buf[:, 1])
+        self.right.run(right)
+        buf[:, 1] = right
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100

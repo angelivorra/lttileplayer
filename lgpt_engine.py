@@ -554,20 +554,26 @@ class TablePlayback:
 # --------------------------------------------------------------------------
 
 class SuboctaveFx:
-    """Audio Divider: suboctava del bajo (denominador 1 -> 2 al subir,
-    una sola marcha: suboctava sutil)."""
+    """Audio Divider: suboctava del bajo, denominador fijo en 2 (una sola
+    marcha: octava abajo, sutil). El divisor LADSPA es un parámetro entero
+    (no se puede "barrer" en continuo), así que el knob mezcla dry/wet en
+    vez de mover el denominador: así se nota variación en todo el recorrido
+    del knob en lugar de solo un salto brusco a mitad de camino."""
 
     def __init__(self, sr: int):
         try:
             from ladspa_fx import LadspaStereoDivider
             self.plugin = LadspaStereoDivider(sr)
+            self.plugin.set(2.0)
         except Exception:
             self.plugin = None
 
     def apply(self, buf: np.ndarray, amount: float):
         if self.plugin is not None:
-            self.plugin.set(1.0 + amount * 1.0)
-            self.plugin.run(buf)
+            wet = buf.copy()
+            self.plugin.run(wet)
+            buf *= (1.0 - amount)
+            buf += wet * amount
         else:
             np.tanh(buf * (1.0 + 20.0 * amount), out=buf)
 
@@ -760,6 +766,65 @@ class ChopperFx:
             buf *= (1.0 - amount + amount * mod)[:, None]
 
 
+class FlangerFx:
+    """Retro Flanger: barrido suave con LFO, sin distorsión ni pérdida de
+    nivel (alternativa más limpia al chopper para el mismo canal)."""
+
+    def __init__(self, sr: int):
+        try:
+            from ladspa_fx import LadspaStereoRetroFlange
+            self.plugin = LadspaStereoRetroFlange(sr)
+        except Exception:
+            self.plugin = None
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if self.plugin is not None:
+            self.plugin.set(8.0 * amount, 0.3 + 1.2 * amount)
+            self.plugin.run(buf)
+
+
+class BeatDelayFx:
+    """Delay sincronizado al tempo: el eco cae exactamente cada negra del
+    tempo de la canción (no del reloj de pared). El knob controla la
+    mezcla wet/dry y, con ella, cuántas repeticiones se oyen (feedback).
+    Sin plugin LADSPA: línea de retardo propia en numpy, para tener el
+    tiempo exacto en samples sin depender de puertos en segundos/pulgadas.
+    """
+
+    def __init__(self, sr: int):
+        self.sr = sr
+        self._tempo: Optional[float] = None
+        self._buf = np.zeros((1, 2), dtype=np.float32)
+        self._pos = 0
+
+    def set_tempo(self, bpm: float):
+        if bpm == self._tempo:
+            return
+        self._tempo = bpm
+        beat_samples = max(1, round(60.0 / max(bpm, 1.0) * self.sr))
+        self._buf = np.zeros((beat_samples, 2), dtype=np.float32)
+        self._pos = 0
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if amount <= 0.001:
+            return
+        feedback = 0.15 + 0.45 * amount
+        fb_buf = self._buf
+        d = len(fb_buf)
+        pos = self._pos
+        out = np.empty_like(buf)
+        for i in range(len(buf)):
+            wet = fb_buf[pos]
+            out[i] = wet
+            fb_buf[pos] = buf[i] + wet * feedback
+            pos += 1
+            if pos >= d:
+                pos = 0
+        self._pos = pos
+        buf *= (1.0 - amount)
+        buf += out * amount
+
+
 class TapeDelayFx:
     """Tape Delay: 0 = seco puro; al subir entra el eco (tap 1 a -6 dB,
     dry baja 2 dB para no inflar la mezcla)."""
@@ -784,9 +849,11 @@ EFFECT_PRESETS = {
     "satan": SatanFx,
     "ringmod": RingmodFx,
     "chopper": ChopperFx,
+    "flanger": FlangerFx,
     "phaser": PhaserFx,
     "decimator": DecimatorFx,
     "tape_delay": TapeDelayFx,
+    "beat_delay": BeatDelayFx,
     "acid_lp": AcidLpFx,
 }
 
@@ -1032,6 +1099,9 @@ class Engine:
                     if fx is None:
                         fx = cls(self.sr)
                         ch.fx_objs[name] = fx
+                    set_tempo = getattr(fx, "set_tempo", None)
+                    if set_tempo is not None:
+                        set_tempo(self.tempo)
                     fx.apply(block, amount)
             if ch.cc_vol != 1.0:
                 block *= ch.cc_vol

@@ -41,9 +41,14 @@ done
 
 echo "==> 3/6 Entorno virtual en la Pi"
 ssh "$PI" "
-    sudo apt-get install -y -qq python3-venv python3-pip libasound2-dev >/dev/null
-    [ -d '$APP/.venv' ] || python3 -m venv '$APP/.venv'
-    '$APP/.venv/bin/pip' install -q --upgrade numpy sounddevice soundfile mido python-rtmidi
+    if [ -x '$APP/.venv/bin/python' ] && \
+       '$APP/.venv/bin/python' -c 'import numpy, sounddevice, soundfile, mido' 2>/dev/null; then
+        echo '  ya instalado, nada que hacer (Pi sin acceso a internet)'
+    else
+        sudo apt-get install -y -qq python3-venv python3-pip libasound2-dev >/dev/null
+        [ -d '$APP/.venv' ] || python3 -m venv '$APP/.venv'
+        '$APP/.venv/bin/pip' install -q --upgrade numpy sounddevice soundfile mido python-rtmidi
+    fi
 "
 
 echo "==> 4/6 Arranque en pantalla (autologin tty1)"
