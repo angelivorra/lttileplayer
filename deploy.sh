@@ -4,14 +4,18 @@
 # Uso: ./deploy.sh [host]        (host SSH por defecto: Lgpt)
 #
 # Idempotente. Hace:
-#   1. Sincroniza el código a /home/angel/lttileplayer
+#   1. Sincroniza el código a /home/angel/lttileplayer (incluye
+#      lttileplayer.toml: la config real y actual vive en el repo)
 #   2. Copia las canciones a /home/angel/Documentos/canciones
 #   3. Crea el venv en la Pi e instala dependencias (pip)
-#   4. Escribe lttileplayer.toml para la Pi (audio HAT, MIDI)
-#   5. Instala lttileplayer.service (systemd) y lo arranca
-#   6. Desactiva el antiguo lgpt.service y limpia rc.local
-#   7. Verifica: servicio activo, puerto MIDI conectado a movida:in,
+#   4. Instala lttileplayer.service (systemd) y lo arranca
+#   5. Desactiva el antiguo lgpt.service y limpia rc.local
+#   6. Verifica: servicio activo, puerto MIDI conectado a movida:in,
 #      y render de prueba del engine en la Pi
+#
+# lttileplayer.toml se edita en el repo (o con lgpt_setup.py / la
+# pantalla CONFIG del player en la propia Pi) — deploy.sh ya no lo
+# sobrescribe con una plantilla aparte.
 
 set -euo pipefail
 
@@ -20,11 +24,9 @@ APP=/home/angel/lttileplayer
 SONGS_DST=/home/angel/Documentos/canciones
 SONGS_SRC="${SONGS_SRC:-/home/angel/LGPT/songs}"
 SONGS=(lgpt_abduccion lgpt_Bulebule lgpt_Energia lgpt_Sartenazo.VERSION1)
-AUDIO_DEV="${AUDIO_DEV:-IQaudIODAC}"
-MIDI_IN="${MIDI_IN:-Minilab3}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "==> 1/7 Código -> $PI:$APP"
+echo "==> 1/6 Código -> $PI:$APP"
 ssh "$PI" "mkdir -p '$APP' '$SONGS_DST'"
 rsync -a --delete \
     --include='lgpt_*.py' --include='ladspa_fx.py' \
@@ -32,54 +34,19 @@ rsync -a --delete \
     --include='tests/' --include='tests/**' --exclude='*' \
     "$HERE/" "$PI:$APP/"
 
-echo "==> 2/7 Canciones -> $SONGS_DST"
+echo "==> 2/6 Canciones -> $SONGS_DST"
 for s in "${SONGS[@]}"; do
     rsync -a "$SONGS_SRC/$s" "$PI:$SONGS_DST/"
 done
 
-echo "==> 3/7 Entorno virtual en la Pi"
+echo "==> 3/6 Entorno virtual en la Pi"
 ssh "$PI" "
     sudo apt-get install -y -qq python3-venv python3-pip libasound2-dev >/dev/null
     [ -d '$APP/.venv' ] || python3 -m venv '$APP/.venv'
     '$APP/.venv/bin/pip' install -q --upgrade numpy sounddevice soundfile mido python-rtmidi
 "
 
-echo "==> 4/7 Configuración ($APP/lttileplayer.toml)"
-ssh "$PI" "cat > '$APP/lttileplayer.toml'" <<'EOF'
-# Configuración de lttileplayer en la Pi (generada por deploy.sh).
-songs_dir = "/home/angel/Documentos/canciones/"
-
-[audio]
-output = "AUDIO_DEV_PLACEHOLDER"
-samplerate = 44100
-blocksize = 512
-delay = 1.0
-record = ""
-
-[midi]
-input = "MIDI_IN_PLACEHOLDER"
-output = "virtual"
-
-[buttons]
-up = "note:9:37"
-down = "note:9:36"
-accept = "note:9:38"
-play = "note:9:41"
-stop = "note:9:40"
-
-[pots]
-pot1 = { cc = "", target = "2:lp_cutoff" }
-pot2 = { cc = "", target = "2:volume" }
-pot3 = { cc = "", target = "2:pan" }
-pot4 = { cc = "", target = "2:pitch" }
-pot5 = { cc = "", target = "2:lp_res" }
-pot6 = { cc = "", target = "" }
-pot7 = { cc = "", target = "" }
-pot8 = { cc = "", target = "" }
-EOF
-ssh "$PI" "sed -i 's|AUDIO_DEV_PLACEHOLDER|$AUDIO_DEV|; s|MIDI_IN_PLACEHOLDER|$MIDI_IN|' '$APP/lttileplayer.toml'"
-
-echo "==> 5/7 Arranque en pantalla (autologin tty1)"
+echo "==> 4/6 Arranque en pantalla (autologin tty1)"
 ssh "$PI" "cat > '$APP/midi-connect.sh' && chmod +x '$APP/midi-connect.sh'" <<'EOF'
 #!/bin/sh
 # Conecta la salida MIDI de lttileplayer al bridge TCP-MIDI (movida:in)
@@ -117,7 +84,7 @@ EOF
     sudo systemctl enable --now getty@tty1.service
 "
 
-echo "==> 6/7 Sustituir el arranque antiguo"
+echo "==> 5/6 Sustituir el arranque antiguo"
 ssh "$PI" "
     sudo systemctl disable --now lgpt.service lttileplayer.service 2>/dev/null || true
     sudo rm -f /etc/systemd/system/lgpt.service /etc/systemd/system/lttileplayer.service
@@ -125,7 +92,7 @@ ssh "$PI" "
     sudo systemctl daemon-reload
 "
 
-echo "==> 7/7 Verificación"
+echo "==> 6/6 Verificación"
 sleep 6
 ssh "$PI" "
     pgrep -af lgpt_player
