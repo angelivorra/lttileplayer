@@ -724,8 +724,9 @@ class DecimatorFx:
 
 
 class ChopperFx:
-    """Tremolo/gate con LFO cuadrado (Ringmod with LFO): depth 0 = bypass;
-    al subir, corte afilado de 2 a 16 Hz. No sube el nivel."""
+    """Tremolo/gate con LFO (Ringmod with LFO): depth 0 = bypass;
+    al subir, corte de 2 a 16 Hz con onda TRIANGULAR (bordes suaves).
+    No sube el nivel."""
 
     def __init__(self, sr: int):
         try:
@@ -734,7 +735,8 @@ class ChopperFx:
             self.right = LadspaRingmod(sr)
             for p in (self.left, self.right):
                 p.set_control(2, 0.0)      # sine off
-                p.set_control(5, 1.0)      # square on
+                p.set_control(3, 1.0)      # triangle on
+                p.set_control(5, 0.0)      # square off
             self.ok = True
         except Exception:
             self.ok = False
