@@ -2,7 +2,7 @@
   "mute": [],
   "pots": {
     "pot1": "2:suboctave",
-    "pot5": "2:lp_res",
+    "pot5": "2:acid_lp",
     "pot2": "5:flanger",
     "pot6": "5:beat_delay"
   }

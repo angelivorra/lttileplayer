@@ -43,7 +43,7 @@ pot1 = { cc = "cc:0:70", target = "2:suboctave" }
 pot2 = { cc = "cc:0:71", target = "5:flanger" }
 pot3 = { cc = "cc:0:72", target = "" }
 pot4 = { cc = "cc:0:73", target = "" }
-pot5 = { cc = "cc:0:74", target = "2:lp_res" }
+pot5 = { cc = "cc:0:74", target = "2:acid_lp" }
 pot6 = { cc = "cc:0:75", target = "5:beat_delay" }
 pot7 = { cc = "cc:0:76", target = "" }
 pot8 = { cc = "cc:0:77", target = "" }
