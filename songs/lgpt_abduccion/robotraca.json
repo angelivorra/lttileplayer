@@ -1,0 +1,15 @@
+{
+  "mute": [3, 4, 6, 7],
+  "pots": {
+    "pot1": "2:suboctave",
+    "pot5": "2:lp_res",
+    "pot2": "5:flanger",
+    "pot6": "5:beat_delay"
+  },
+  "pad_volume": {
+    "1": 25,
+    "2": 25,
+    "3": 25,
+    "4": 25
+  }
+}

@@ -1,7 +1,9 @@
 # Configuración de lttileplayer (generada por lgpt_setup.py).
 # Los argumentos de línea de comandos tienen prioridad.
 
-songs_dir = "/home/angel/Documentos/canciones/"
+# Carpeta de canciones. Relativa = junto al programa (vale igual en el PC de
+# desarrollo y en la Pi). Cada canción es lgpt_<nombre>/ con su robotraca.json.
+songs_dir = "songs"
 
 [audio]
 output = "IQaudIODAC"
@@ -9,7 +11,7 @@ samplerate = 44100
 blocksize = 512
 delay = 1.0
 record = ""
-wavs_dir = "/home/angel/lttileplayer/wavs"
+wavs_dir = "wavs"
 pad_volume = 25
 stream = 5050
 

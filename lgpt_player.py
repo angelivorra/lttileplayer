@@ -41,6 +41,23 @@ from lgpt_engine import Engine, MidiOut, SAMPLE_RATE
 DEFAULT_SONGS_DIR = "/home/angel/Documentos/canciones/"
 CONFIG_PATH = Path(__file__).resolve().parent / "lttileplayer.toml"
 
+# --- Visualizador en directo (espectro reactivo al audio) --------------------
+# Se analiza el audio ya mezclado (el bloque del callback), no el motor: una
+# ventana rodante de VIZ_NFFT muestras -> rFFT -> bandas log. Todo el análisis
+# ocurre en el hilo de UI; el hilo de audio solo copia el bloque (ver
+# _audio_callback). Constantes calibradas sobre canciones reales.
+VIZ_NFFT = 2048           # ~46 ms @44.1k: resuelve graves sin retardo visible
+VIZ_FMIN = 35.0
+VIZ_FMAX = 16000.0
+VIZ_GAIN = 35.0           # compresión 1-exp(-x*G): picos ~tope, medias ~0.3-0.6
+VIZ_TILT = 0.5            # realce de agudos: peso (f/fmin)**VIZ_TILT
+VIZ_MAX_BANDS = 48        # más bandas que bins útiles solo repetiría barras
+VIZ_ATTACK = 0.6          # subida rápida de la barra (0-1, mayor = más rápida)
+VIZ_RELEASE = 0.16        # caída lenta de la barra
+VIZ_PEAK_FALL = 0.012     # caída del testigo de pico por frame
+# Sub-bloques verticales para resolución fina dentro de cada celda de texto.
+VIZ_BLOCKS = " ▁▂▃▄▅▆▇█"
+
 
 def load_config(path: Path) -> dict:
     if path.is_file():
@@ -484,6 +501,15 @@ class Player:
         self.recorder: WavRecorder | None = None
         self._notice: tuple | None = None   # (mensaje, timestamp) para la UI
         self.streamer: TcpStreamer | None = None
+        self._expected_dac_time: float | None = None  # reloj real esperado
+        # visualizador en directo (ver constantes VIZ_*)
+        self._view_mode = "viz"              # "viz" | "detail"
+        self._want_viz = False               # el callback copia audio solo si True
+        self._viz_ring = np.zeros(VIZ_NFFT, dtype=np.float32)  # audio mono rodante
+        self._viz_bands = None               # alturas suavizadas (0-1) por barra
+        self._viz_peaks = None               # testigos de pico por barra
+        self._viz_win = np.hanning(VIZ_NFFT).astype(np.float32)
+        self._viz_layout_cache: dict = {}    # nbands -> (edges, weights, colors)
         self.stream = sd.OutputStream(
             samplerate=args.samplerate,
             channels=2,
@@ -497,6 +523,15 @@ class Player:
 
     def _audio_callback(self, outdata, frames, time_info, status):
         engine = self.engine_ref.get("engine")
+        dac_time = time_info.outputBufferDacTime
+        if engine is not None:
+            expected = self._expected_dac_time
+            if expected is not None:
+                drift = dac_time - expected
+                if drift > 0.002:      # >2ms: xrun real, no ruido de reloj
+                    engine.catch_up(drift)
+                    self._set_notice(f"glitch recuperado ({drift * 1000:.0f}ms)")
+        self._expected_dac_time = dac_time + frames / self.args.samplerate
         if engine is None:
             outdata[:] = 0
         else:
@@ -507,6 +542,15 @@ class Player:
         streamer = self.streamer
         if streamer is not None:
             streamer.write(outdata)
+        if self._want_viz:
+            # ventana rodante mono para el visualizador (swap de referencia:
+            # el hilo de UI ve siempre un snapshot consistente, sin locks).
+            mono = (outdata[:, 0] + outdata[:, 1]).astype(np.float32)
+            n = len(mono)
+            if n >= VIZ_NFFT:
+                self._viz_ring = mono[-VIZ_NFFT:].copy()
+            else:
+                self._viz_ring = np.concatenate((self._viz_ring[n:], mono))
 
     def _load_song(self, index: int):
         project_dir = self.projects[index]
@@ -620,6 +664,108 @@ class Player:
         self._draw_notice(scr, curses, h - 1)
         scr.refresh()
 
+    # -- visualizador en directo (espectro reactivo) ----------------------------
+
+    def _enter_song_view(self, scr):
+        """Ajusta refresco y análisis según el modo de vista de canción:
+        el visualizador va a ~30 fps (necesita fluidez); la vista detallada
+        a 10 fps basta y ahorra CPU en la Pi."""
+        self._want_viz = self._view_mode == "viz"
+        self._viz_bands = None            # reinicia envolvente al entrar
+        self._viz_peaks = None
+        scr.timeout(33 if self._want_viz else 100)
+
+    def _viz_layout(self, nbands: int):
+        """Bordes de bin, pesos y color por barra para `nbands` bandas
+        log-espaciadas. Cacheado: solo cambia si cambia el ancho del terminal."""
+        cached = self._viz_layout_cache.get(nbands)
+        if cached is not None:
+            return cached
+        sr = self.args.samplerate
+        nbins = VIZ_NFFT // 2 + 1
+        freqs = np.logspace(np.log10(VIZ_FMIN),
+                            np.log10(min(VIZ_FMAX, sr / 2 * 0.95)), nbands + 1)
+        edges, weights, colors = [], [], []
+        ng = len(self._viz_gradient)
+        for i in range(nbands):
+            lo = int(freqs[i] / (sr / 2) * (nbins - 1))
+            hi = max(lo + 1, int(freqs[i + 1] / (sr / 2) * (nbins - 1)))
+            edges.append((lo, min(hi, nbins)))
+            center = math.sqrt(freqs[i] * freqs[i + 1])
+            weights.append((center / VIZ_FMIN) ** VIZ_TILT)
+            colors.append(self._viz_gradient[min(ng - 1, i * ng // nbands)])
+        layout = (edges, np.array(weights, dtype=np.float32), colors)
+        self._viz_layout_cache[nbands] = layout
+        return layout
+
+    def _viz_levels(self, nbands: int) -> np.ndarray:
+        """Nivel 0-1 por banda del último audio (rFFT de la ventana rodante),
+        con realce de agudos y compresión suave para que ninguna banda domine."""
+        edges, weights, _ = self._viz_layout(nbands)
+        spec = np.abs(np.fft.rfft(self._viz_ring * self._viz_win)) / VIZ_NFFT
+        raw = np.array([spec[lo:hi].mean() for lo, hi in edges],
+                       dtype=np.float32)
+        return 1.0 - np.exp(-raw * weights * VIZ_GAIN)
+
+    def _draw_viz(self, scr, curses, engine: Engine):
+        """Barras de espectro a pantalla completa, reactivas al audio."""
+        scr.erase()
+        h, w = scr.getmaxyx()
+        # cabecera mínima: estado + canción + BPM (el resto es visual)
+        if engine.finished:
+            sym, cpair = "[]", 6
+        elif engine.playing:
+            sym, cpair = ">", 2
+        else:
+            sym, cpair = "II", 5
+        name = display_name(engine.project.dir.name)
+        head = f"{sym} {name}  {engine.tempo}BPM"
+        scr.addstr(0, 1, head[:w - 2], curses.color_pair(cpair) | curses.A_BOLD)
+
+        rows = h - 1                         # filas para barras (fila 0 = cabecera)
+        if rows < 2 or w < 6:
+            self._draw_notice(scr, curses, h - 1)
+            scr.refresh()
+            return
+        step = 3 if w >= 24 else 2           # barra de 2 + 1 de hueco (o 1+1)
+        bar_w = step - 1
+        nbands = min(VIZ_MAX_BANDS, (w - 1) // step)
+        _, _, colors = self._viz_layout(nbands)
+
+        target = self._viz_levels(nbands)
+        bands, peaks = self._viz_bands, self._viz_peaks
+        if bands is None or len(bands) != nbands:
+            bands = np.zeros(nbands, dtype=np.float32)
+            peaks = np.zeros(nbands, dtype=np.float32)
+        # envolvente por barra: ataque rápido, caída lenta (look de directo)
+        rising = target > bands
+        bands += np.where(rising, VIZ_ATTACK, VIZ_RELEASE) * (target - bands)
+        peaks = np.maximum(peaks - VIZ_PEAK_FALL, bands)
+        self._viz_bands, self._viz_peaks = bands, peaks
+
+        x0 = max(1, (w - nbands * step) // 2)
+        levels = 8                           # sub-bloques por celda (VIZ_BLOCKS)
+        for i in range(nbands):
+            x = x0 + i * step
+            attr = colors[i]
+            total = int(bands[i] * rows * levels)
+            full, part = divmod(total, levels)
+            for r in range(min(full, rows)):
+                y = h - 1 - r
+                a = attr | (curses.A_BOLD if r >= rows * 0.6 else 0)
+                scr.addstr(y, x, "█" * bar_w, a)
+            if full < rows and part > 0:
+                y = h - 1 - full
+                scr.addstr(y, x, VIZ_BLOCKS[part] * bar_w, attr)
+            # testigo de pico
+            pr = int(peaks[i] * rows)
+            if 0 < pr <= rows:
+                y = h - 1 - min(pr, rows - 1)
+                scr.addstr(y, x, "▁" * bar_w, self._viz_cap)
+
+        self._draw_notice(scr, curses, h - 1)
+        scr.refresh()
+
     def _draw_song(self, scr, curses, engine: Engine):
         scr.erase()
         h, w = scr.getmaxyx()
@@ -674,7 +820,8 @@ class Player:
                     scr.addstr(y, 10, "MUTE", curses.color_pair(5))
                 elif ch.playing:
                     scr.addstr(y, 10, "·", curses.color_pair(3))
-        scr.addstr(h - 1, 1, "espacio: pausa  n/p: canción  q: lista"[:w - 2],
+        scr.addstr(h - 1, 1,
+                   "espacio: pausa  n/p: canción  v: visor  q: lista"[:w - 2],
                    curses.color_pair(3))
         self._draw_notice(scr, curses, h - 2)
         scr.refresh()
@@ -702,6 +849,16 @@ class Player:
         self._pair_bright = curses.color_pair(1) | curses.A_BOLD
         self._pair_sel = curses.color_pair(2) | curses.A_BOLD
         self._pair_dim = curses.color_pair(3) | curses.A_DIM
+        # Paleta a color solo para el visualizador (gradiente grave->agudo).
+        # Fuera del verde fósforo del resto de la UI a propósito: el directo
+        # pide color. Sobre tty1 con setvtrgb salen algo lavados pero legibles.
+        viz_fg = [curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_GREEN,
+                  curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_MAGENTA]
+        for i, fg in enumerate(viz_fg):
+            curses.init_pair(10 + i, fg, bg)
+        curses.init_pair(16, curses.COLOR_WHITE, bg)   # testigo de pico
+        self._viz_gradient = [curses.color_pair(10 + i) for i in range(6)]
+        self._viz_cap = curses.color_pair(16) | curses.A_BOLD
         scr.timeout(100)
         engine = None
         needs_clear = True                # limpieza completa al cambiar de vista
@@ -733,9 +890,13 @@ class Player:
                 engine = self._load_song(self.index)
                 self._drain_buttons()
                 scr.clear()               # limpieza al entrar en la canción
+                self._enter_song_view(scr)
                 while True:               # vista canción
                     try:
-                        self._draw_song(scr, curses, engine)
+                        if self._view_mode == "viz":
+                            self._draw_viz(scr, curses, engine)
+                        else:
+                            self._draw_song(scr, curses, engine)
                     except curses.error:
                         pass              # pantalla pequeña: recorte
                     key = self._read_key(scr, curses, "song")
@@ -744,6 +905,11 @@ class Player:
                     if key == " ":
                         engine.push_event(
                             "pause" if engine.playing else "play")
+                    elif key == "v":
+                        self._view_mode = ("detail" if self._view_mode == "viz"
+                                           else "viz")
+                        self._enter_song_view(scr)
+                        scr.clear()
                     elif key == "n":
                         self.index = (self.index + 1) % len(self.projects)
                         engine = self._load_song(self.index)
@@ -753,6 +919,8 @@ class Player:
                     elif key in ("q", "esc"):
                         engine.push_event("stop")
                         self.engine_ref["engine"] = None
+                        self._want_viz = False
+                        scr.timeout(100)
                         needs_clear = True
                         break
 
@@ -1128,6 +1296,12 @@ def main():
 
     # Prioridad: línea de comandos > lttileplayer.toml > defecto
     args.songs = args.songs or cfg.get("songs_dir", DEFAULT_SONGS_DIR)
+    # songs_dir relativo se resuelve contra la carpeta del programa, así el
+    # mismo toml sirve en el PC de desarrollo y en la Pi (ambos usan "songs").
+    songs_path = Path(args.songs)
+    if not songs_path.is_absolute():
+        songs_path = CONFIG_PATH.parent / songs_path
+    args.songs = str(songs_path)
     args.device = args.device or audio_cfg.get("output") or None
     args.samplerate = args.samplerate or audio_cfg.get("samplerate", SAMPLE_RATE)
     args.blocksize = args.blocksize or audio_cfg.get("blocksize", 512)
@@ -1150,7 +1324,13 @@ def main():
     args.hw_pots = cfg.get("pots", {})     # mapeo físico global (CC por knob)
     args.pots = []                          # targets (se arman por canción)
     args.mute = cfg.get("channels", {}).get("mute", [])
-    args.wavs_dir = audio_cfg.get("wavs_dir") or None
+    wd = audio_cfg.get("wavs_dir") or None
+    if wd:                                   # relativo -> junto al programa
+        wp = Path(wd)
+        if not wp.is_absolute():
+            wp = CONFIG_PATH.parent / wp
+        wd = str(wp)
+    args.wavs_dir = wd
     args.pad_volume = audio_cfg.get("pad_volume", 60)
 
     Player(args).run()

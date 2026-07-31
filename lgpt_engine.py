@@ -812,17 +812,22 @@ class BeatDelayFx:
         fb_buf = self._buf
         d = len(fb_buf)
         pos = self._pos
-        out = np.empty_like(buf)
-        for i in range(len(buf)):
-            wet = fb_buf[pos]
-            out[i] = wet
-            fb_buf[pos] = buf[i] + wet * feedback
-            pos += 1
-            if pos >= d:
-                pos = 0
-        self._pos = pos
+        n = len(buf)
+        # d (una negra a tempo, miles de muestras) es siempre >> n (bloque
+        # de audio, cientos de muestras): el caso normal no envuelve el
+        # buffer circular y se puede vectorizar con slices en vez de un
+        # bucle Python muestra a muestra (caro en la Pi).
+        if pos + n <= d:
+            wet = fb_buf[pos:pos + n].copy()
+            fb_buf[pos:pos + n] = buf + wet * feedback
+        else:
+            k = d - pos
+            wet = np.concatenate((fb_buf[pos:], fb_buf[:n - k]))
+            fb_buf[pos:] = buf[:k] + fb_buf[pos:] * feedback
+            fb_buf[:n - k] = buf[k:] + fb_buf[:n - k] * feedback
+        self._pos = (pos + n) % d
         buf *= (1.0 - amount)
-        buf += out * amount
+        buf += wet * amount
 
 
 class TapeDelayFx:
@@ -1120,6 +1125,28 @@ class Engine:
         out *= self.master
         np.clip(out, -1.0, 1.0, out=out)
         return out
+
+    # Tope de recuperación por llamada: si el hueco es enorme (proceso
+    # suspendido, no un xrun normal), no tiene sentido recorrer miles de
+    # ticks uno a uno — se resincroniza el reloj directamente.
+    _MAX_CATCH_UP_SECONDS = 5.0
+
+    def catch_up(self, seconds: float):
+        """Adelanta el reloj del secuenciador cuando el callback de audio
+        se ha retrasado respecto al reloj real (xrun/glitch): ejecuta los
+        ticks perdidos (song/chain/phrase, tablas, notas MIDI) SIN
+        sintetizar audio, para que el compás no quede desplazado del
+        tiempo real. El audio de ese hueco ya se ha perdido (silencio del
+        driver); esto solo realinea a partir de qué punto sigue sonando.
+        """
+        if not self.playing or seconds <= 0.0:
+            return
+        seconds = min(seconds, self._MAX_CATCH_UP_SECONDS)
+        self.tick_phase -= seconds * self.sr
+        while self.tick_phase < 1.0 and self.playing:
+            frac = self.tick_phase
+            self._process_tick()
+            self.tick_phase = self.samples_per_tick + frac
 
     def _delay_channel(self, ch: Channel, block: np.ndarray) -> np.ndarray:
         """Línea de retardo circular del canal; devuelve el bloque

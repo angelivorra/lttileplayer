@@ -6,7 +6,7 @@
 # Idempotente. Hace:
 #   1. Sincroniza el código a /home/angel/lttileplayer (incluye
 #      lttileplayer.toml: la config real y actual vive en el repo)
-#   2. Copia las canciones a /home/angel/Documentos/canciones
+#   2. Copia las canciones (repo songs/) a /home/angel/lttileplayer/songs
 #   3. Crea el venv en la Pi e instala dependencias (pip)
 #   4. Instala lttileplayer.service (systemd) y lo arranca
 #   5. Desactiva el antiguo lgpt.service y limpia rc.local
@@ -21,10 +21,13 @@ set -euo pipefail
 
 PI="${1:-Lgpt}"
 APP=/home/angel/lttileplayer
-SONGS_DST=/home/angel/Documentos/canciones
-SONGS_SRC="${SONGS_SRC:-/home/angel/LGPT/songs}"
-SONGS=(lgpt_abduccion lgpt_Bulebule lgpt_Energia lgpt_Sartenazo.VERSION1)
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Las canciones (con su robotraca.json) viven en el repo, en songs/, y se
+# despliegan dentro de la app ($APP/songs). songs_dir del toml es relativo
+# ("songs"), así el mismo config vale en el PC y en la Pi.
+SONGS_DST="$APP/songs"
+SONGS_SRC="${SONGS_SRC:-$HERE/songs}"
+SONGS=(lgpt_abduccion lgpt_Bulebule lgpt_Energia lgpt_Sartenazo.VERSION1)
 
 echo "==> 1/6 Código -> $PI:$APP"
 ssh "$PI" "mkdir -p '$APP' '$SONGS_DST'"
@@ -36,7 +39,7 @@ rsync -a --delete \
 
 echo "==> 2/6 Canciones -> $SONGS_DST"
 for s in "${SONGS[@]}"; do
-    rsync -a "$SONGS_SRC/$s" "$PI:$SONGS_DST/"
+    rsync -a --exclude='mixdown.wav' "$SONGS_SRC/$s" "$PI:$SONGS_DST/"
 done
 
 echo "==> 3/6 Entorno virtual en la Pi"
