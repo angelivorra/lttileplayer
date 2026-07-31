@@ -1,9 +1,11 @@
 {
-  "mute": [],
+  "mute": [
+    5,
+    6
+  ],
   "pots": {
-    "pot1": "2:suboctave",
-    "pot5": "2:acid_lp",
-    "pot2": "5:flanger",
-    "pot6": "5:beat_delay"
+    "pot1": "0:flanger",
+    "pot5": "0:suboctave",
+    "pot4": "0:space:24"
   }
 }

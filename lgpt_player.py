@@ -472,25 +472,40 @@ FONT3X5 = {
 
 
 def big_text(scr, y: int, x: int, text: str, scale: int, attr):
-    """Dibuja `text` con la microfuente 3x5 escalada en bloques."""
+    """Dibuja `text` con la microfuente 3x5 escalada en bloques.
+
+    Escala en los dos ejes: cada píxel del glifo ocupa scale x scale celdas
+    (si solo se escalara a lo ancho, las letras salen a rayas). Las celdas
+    que caen fuera de pantalla se descartan: en un terminal pequeño interesa
+    recortar, no abortar el repintado entero."""
+    h, w = scr.getmaxyx()
     for i, ch in enumerate(text):
         glyph = FONT3X5.get(ch, FONT3X5[" "])
         for r, line in enumerate(glyph):
             for c, px in enumerate(line):
-                if px != " ":
-                    scr.addstr(y + r * scale, x + i * 4 * scale + c * scale,
-                               "█" * scale, attr)
+                if px == " ":
+                    continue
+                px_x = x + i * 4 * scale + c * scale
+                for dy in range(scale):
+                    py = y + r * scale + dy
+                    if 0 <= py < h and 0 <= px_x < w - 1:
+                        scr.addstr(py, px_x, "█" * min(scale, w - 1 - px_x),
+                                   attr)
 
 
 def big_text_half(scr, y: int, x: int, text: str, attr):
     """Dibuja `text` con la microfuente 3x5 usando medio-bloques (▀ ▄ █):
     cada celda empaqueta 2 píxeles verticales, así que el texto queda más
     suave y compacto (3 filas de celda en vez de 5)."""
+    h, w = scr.getmaxyx()
     for i, ch in enumerate(text):
         glyph = FONT3X5.get(ch, FONT3X5[" "])
         for pair in range(3):
             top = glyph[pair * 2]
             bottom = glyph[pair * 2 + 1] if pair * 2 + 1 < 5 else "   "
+            py = y + pair
+            if not 0 <= py < h:
+                continue          # terminal pequeño: se recorta, no se aborta
             for c in range(3):
                 t, b = top[c] != " ", bottom[c] != " "
                 if t and b:
@@ -501,7 +516,9 @@ def big_text_half(scr, y: int, x: int, text: str, attr):
                     cell = "▄"
                 else:
                     continue
-                scr.addstr(y + pair, x + i * 4 + c, cell, attr)
+                px = x + i * 4 + c
+                if 0 <= px < w - 1:
+                    scr.addstr(py, px, cell, attr)
 
 
 def display_name(dirname: str) -> str:
@@ -733,9 +750,20 @@ class Player:
         big_text_half(scr, y, max(0, (w - len(prev) * 4) // 2), prev,
                       self._pair_dim)
         y += 3 + 1
+        # Seleccionada en negativo: banda verde a todo el ancho y el nombre
+        # en negro encima (con negro sobre verde, un espacio pinta el fondo
+        # y un bloque lleno pinta la letra).
+        rows_sel = 5 * sel_scale
+        for r in range(rows_sel):
+            yy = y + r
+            if not 0 <= yy < h:
+                continue
+            # escribir en la última celda de la pantalla es error en curses
+            width = w if yy < h - 1 else w - 1
+            scr.addstr(yy, 0, " " * width, self._pair_neg)
         big_text(scr, y, max(0, (w - len(current) * 4 * sel_scale) // 2),
-                 current, sel_scale, self._pair_sel)
-        y += 5 * sel_scale + 1
+                 current, sel_scale, self._pair_neg)
+        y += rows_sel + 1
         big_text_half(scr, y, max(0, (w - len(nxt) * 4) // 2), nxt,
                       self._pair_dim)
         self._draw_notice(scr, curses, h - 1)
@@ -969,6 +997,7 @@ class Player:
         self._pair_bright = curses.color_pair(1) | curses.A_BOLD
         self._pair_sel = curses.color_pair(2) | curses.A_BOLD
         self._pair_dim = curses.color_pair(3) | curses.A_DIM
+        self._pair_neg = curses.color_pair(4)      # negro sobre verde
         # Paleta a color solo para el visualizador (gradiente grave->agudo).
         # Fuera del verde fósforo del resto de la UI a propósito: el directo
         # pide color. Sobre tty1 con setvtrgb salen algo lavados pero legibles.

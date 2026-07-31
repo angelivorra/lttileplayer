@@ -932,7 +932,7 @@ class ReverbFx(_ReverbBase):
     atención. La cola del plugin sale a ~0.3 del nivel de entrada, de ahí
     la ganancia alta del wet."""
 
-    _WET_GAIN = 1.8
+    _WET_GAIN = 2.5
     _TIME_S = 1.6
     _DAMPING = 0.35
 
@@ -950,7 +950,7 @@ class SpaceFx(_ReverbBase):
 
     # Calibrado para que a tope se note de verdad: el dry baja a la mitad y
     # la cola pesa ~2x la señal original (respuesta lineal con el knob).
-    _WET_GAIN = 1.0
+    _WET_GAIN = 1.4
     _DRY_DUCK = 0.5
     _ROOM_M = 60.0
     _TIME_S = 4.0
@@ -988,10 +988,17 @@ class BeatDelayFx:
         self._buf = np.zeros((beat_samples, 2), dtype=np.float32)
         self._pos = 0
 
+    # Con feedback 0.6 se oían ~9 repeticiones y, al llegar el knob al tope,
+    # el seco desaparecía del todo (solo ecos): demasiado delay y demasiado
+    # fuerte. Con 0.30 quedan ~4 repeticiones y el seco nunca baja del 50%.
+    _FEEDBACK_MIN = 0.08
+    _FEEDBACK_RANGE = 0.22
+    _WET_MAX = 0.5
+
     def apply(self, buf: np.ndarray, amount: float):
         if amount <= 0.001:
             return
-        feedback = 0.15 + 0.45 * amount
+        feedback = self._FEEDBACK_MIN + self._FEEDBACK_RANGE * amount
         fb_buf = self._buf
         d = len(fb_buf)
         pos = self._pos
@@ -1009,8 +1016,9 @@ class BeatDelayFx:
             fb_buf[pos:] = buf[:k] + fb_buf[pos:] * feedback
             fb_buf[:n - k] = buf[k:] + fb_buf[:n - k] * feedback
         self._pos = (pos + n) % d
-        buf *= (1.0 - amount)
-        buf += wet * amount
+        w = self._WET_MAX * amount
+        buf *= (1.0 - w)
+        buf += wet * w
 
 
 class TapeDelayFx:
