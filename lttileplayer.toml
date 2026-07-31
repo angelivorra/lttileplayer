@@ -12,7 +12,7 @@ blocksize = 512
 delay = 1.0
 record = ""
 wavs_dir = "wavs"
-pad_volume = 25
+pad_volume = 90
 stream = 5050
 
 [midi]
@@ -47,3 +47,14 @@ pot5 = { cc = "cc:0:74", target = "2:acid_lp" }
 pot6 = { cc = "cc:0:75", target = "5:beat_delay" }
 pot7 = { cc = "cc:0:76", target = "" }
 pot8 = { cc = "cc:0:77", target = "" }
+
+[master]
+# Cadena final de la mezcla (EQ de 3 bandas + limitador), común a todas las
+# canciones. El limitador es la red de seguridad para altavoces: ningún pico
+# pasa de `limit` por muy arriba que se pongan los knobs.
+eq_lo = 1.5        # graves (dB, -70..6)
+eq_mid = -1.0      # medios (dB)
+eq_hi = 2.0        # agudos (dB)
+gain = 3.0         # ganancia de entrada al limitador (dB)
+limit = -1.0       # techo de salida (dB, 0 = fondo de escala)
+release = 0.15     # recuperación del limitador (s)

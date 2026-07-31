@@ -8,5 +8,6 @@
     "pot5": "0:suboctave",
     "pot4": "0:space:24",
     "pot8": "0:tempo"
-  }
+  },
+  "master": 136
 }

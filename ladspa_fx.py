@@ -91,13 +91,14 @@ class LadspaPlugin:
             activate = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(desc.activate)
             activate(self._handle)
         self._controls: dict[int, ctypes.c_float] = {}
-        # Conecta TODOS los puertos de control de entrada a 0.0: un plugin
-        # puede leerlos aunque no los usemos (puntero colgado = segfault)
+        # Conecta TODOS los puertos de control, de entrada y de salida: el
+        # plugin lee los de entrada y ESCRIBE en los de salida (latencia,
+        # atenuación...) aunque no los usemos. Puntero sin conectar = segfault.
         LADSPA_PORT_INPUT = 0x1
         LADSPA_PORT_CONTROL = 0x4
         for port in range(desc.PortCount):
             flags = desc.PortDescriptors[port]
-            if flags & LADSPA_PORT_INPUT and flags & LADSPA_PORT_CONTROL:
+            if flags & LADSPA_PORT_CONTROL:
                 self.set_control(port, 0.0)
 
     def set_control(self, port: int, value: float):
@@ -688,6 +689,62 @@ class LadspaGVerb(LadspaPlugin):
         self._connect(self._handle, GVERB_OUT_R,
                       out_r.ctypes.data_as(ctypes.c_void_p))
         self._run(self._handle, len(mono))
+
+
+DJ_EQ_PATH = "/usr/lib/ladspa/dj_eq_1901.so"
+DJ_EQ_ID = 1901
+DJ_EQ_LO, DJ_EQ_MID, DJ_EQ_HI = 0, 1, 2
+DJ_EQ_IN_L, DJ_EQ_IN_R, DJ_EQ_OUT_L, DJ_EQ_OUT_R = 3, 4, 5, 6
+
+LIMITER_PATH = "/usr/lib/ladspa/fast_lookahead_limiter_1913.so"
+LIMITER_ID = 1913
+LIM_GAIN, LIM_LIMIT, LIM_RELEASE = 0, 1, 2
+LIM_IN_L, LIM_IN_R, LIM_OUT_L, LIM_OUT_R = 4, 5, 6, 7
+
+
+class _StereoInOut(LadspaPlugin):
+    """Plugin estéreo con puertos separados de entrada y salida (no puede
+    usar LadspaPlugin.run(), que conecta el mismo buffer a ambos)."""
+
+    _PORTS: tuple = ()          # (in_l, in_r, out_l, out_r)
+
+    def process(self, left: np.ndarray, right: np.ndarray,
+                out_l: np.ndarray, out_r: np.ndarray):
+        il, ir, ol, orr = self._PORTS
+        self._connect(self._handle, il, left.ctypes.data_as(ctypes.c_void_p))
+        self._connect(self._handle, ir, right.ctypes.data_as(ctypes.c_void_p))
+        self._connect(self._handle, ol, out_l.ctypes.data_as(ctypes.c_void_p))
+        self._connect(self._handle, orr, out_r.ctypes.data_as(ctypes.c_void_p))
+        self._run(self._handle, len(left))
+
+
+class LadspaDjEq(_StereoInOut):
+    """EQ de 3 bandas tipo DJ (dj_eq_1901.so): graves, medios y agudos en dB."""
+
+    _PORTS = (DJ_EQ_IN_L, DJ_EQ_IN_R, DJ_EQ_OUT_L, DJ_EQ_OUT_R)
+
+    def __init__(self, sample_rate: int, path: str = DJ_EQ_PATH):
+        super().__init__(path, DJ_EQ_ID, sample_rate)
+
+    def set(self, lo_db: float, mid_db: float, hi_db: float):
+        self.set_control(DJ_EQ_LO, min(max(lo_db, -70.0), 6.0))
+        self.set_control(DJ_EQ_MID, min(max(mid_db, -70.0), 6.0))
+        self.set_control(DJ_EQ_HI, min(max(hi_db, -70.0), 6.0))
+
+
+class LadspaLimiter(_StereoInOut):
+    """Limitador con lookahead (fast_lookahead_limiter_1913.so): red de
+    seguridad del master, para que ningún pico llegue a fondo de escala."""
+
+    _PORTS = (LIM_IN_L, LIM_IN_R, LIM_OUT_L, LIM_OUT_R)
+
+    def __init__(self, sample_rate: int, path: str = LIMITER_PATH):
+        super().__init__(path, LIMITER_ID, sample_rate)
+
+    def set(self, gain_db: float, limit_db: float, release_s: float):
+        self.set_control(LIM_GAIN, min(max(gain_db, -20.0), 20.0))
+        self.set_control(LIM_LIMIT, min(max(limit_db, -20.0), 0.0))
+        self.set_control(LIM_RELEASE, min(max(release_s, 0.01), 2.0))
 
 
 if __name__ == "__main__":

@@ -12,5 +12,6 @@
     "pot3": "4:flanger",
     "pot7": "4:chopper",
     "pot8": "0:tempo"
-  }
+  },
+  "master": 100
 }

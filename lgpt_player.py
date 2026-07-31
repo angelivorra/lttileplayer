@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
-from lgpt_engine import Engine, MidiOut, SAMPLE_RATE
+from lgpt_engine import Engine, MasterChain, MidiOut, SAMPLE_RATE
 
 DEFAULT_SONGS_DIR = "/home/angel/Documentos/canciones/"
 CONFIG_PATH = Path(__file__).resolve().parent / "lttileplayer.toml"
@@ -630,6 +630,16 @@ class Player:
                         audio_delay=self.args.delay,
                         wavs_dir=self.args.wavs_dir)
         engine.midi_out = self.midi_out
+        m = self.args.master_fx
+        if m:
+            engine.master_chain = MasterChain(
+                self.args.samplerate,
+                lo_db=float(m.get("eq_lo", 0.0)),
+                mid_db=float(m.get("eq_mid", 0.0)),
+                hi_db=float(m.get("eq_hi", 0.0)),
+                limit_db=float(m.get("limit", -1.0)),
+                release_s=float(m.get("release", 0.15)),
+                gain_db=float(m.get("gain", 0.0)))
         engine.start()
         self._apply_song_config(project_dir, engine)
         self.engine_ref["engine"] = engine   # swap atómico de referencia
@@ -648,11 +658,23 @@ class Player:
             except (OSError, json.JSONDecodeError) as exc:
                 print(f"[config] {cfg_file.name}: {exc}")
         engine.muted = set(song_cfg.get("mute", []))
+        # Volumen general de la canción (0-200, 100 = el del proyecto LGPT).
+        # Sirve para igualar la sonoridad entre canciones sin tocar el
+        # lgptsav.dat: unas están mezcladas más fuerte que otras.
+        master = song_cfg.get("master")
+        if master is not None:
+            try:
+                engine.master = engine.base_master * float(master) / 100.0
+            except (TypeError, ValueError):
+                print(f"[config] master inválido: {master!r}")
         # volumen de pads: número (todos) o dict por pad {"2": 40}
         pv = song_cfg.get("pad_volume", self.args.pad_volume)
         if isinstance(pv, dict):
             engine.pad_volume_map = {
                 int(k) - 1: float(v) / 100 for k, v in pv.items()}
+            # los pads que el dict no menciona siguen el volumen global,
+            # no el que trae el engine de fábrica
+            engine.pad_volume_default = float(self.args.pad_volume) / 100
         else:
             engine.pad_volume_map = {}
             engine.pad_volume_default = float(pv) / 100
@@ -1488,6 +1510,7 @@ def main():
             wp = CONFIG_PATH.parent / wp
         wd = str(wp)
     args.wavs_dir = wd
+    args.master_fx = cfg.get("master", {})   # EQ + limitador de la mezcla
     args.pad_volume = audio_cfg.get("pad_volume", 60)
 
     Player(args).run()

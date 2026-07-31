@@ -876,6 +876,60 @@ class FlangerFx:
         buf += dry * (1.0 - amount)
 
 
+class MasterChain:
+    """Cadena final de la mezcla: EQ de 3 bandas + limitador.
+
+    Va después del master y de los pads, así que es lo último que toca el
+    audio. Existe para dos cosas: dar un color de ecualización común a todas
+    las canciones y, sobre todo, que ningún pico llegue a fondo de escala —
+    en directo los knobs pueden sumar mucho nivel de golpe.
+
+    Sin los plugins LADSPA el EQ se desactiva (no merece la pena aproximarlo)
+    pero el limitador cae a un recorte suave, que es lo que protege.
+    """
+
+    def __init__(self, sr: int, lo_db=0.0, mid_db=0.0, hi_db=0.0,
+                 limit_db=-1.0, release_s=0.15, gain_db=0.0):
+        self.sr = sr
+        self.limit = 10.0 ** (limit_db / 20.0)
+        self._l = np.zeros(0, dtype=np.float32)
+        self._r = np.zeros(0, dtype=np.float32)
+        try:
+            from ladspa_fx import LadspaDjEq
+            self.eq = LadspaDjEq(sr)
+            self.eq.set(lo_db, mid_db, hi_db)
+            if lo_db == mid_db == hi_db == 0.0:
+                self.eq = None          # plano: nos ahorramos el paso
+        except Exception:
+            self.eq = None
+        try:
+            from ladspa_fx import LadspaLimiter
+            self.limiter = LadspaLimiter(sr)
+            self.limiter.set(gain_db, limit_db, release_s)
+        except Exception:
+            self.limiter = None
+
+    def apply(self, buf: np.ndarray):
+        n = len(buf)
+        if self.eq is None and self.limiter is None:
+            # sin plugins: recorte suave (tanh) en vez de cortar cuadrado
+            np.tanh(buf / self.limit, out=buf)
+            buf *= self.limit
+            return
+        if len(self._l) != n:
+            self._l = np.zeros(n, dtype=np.float32)
+            self._r = np.zeros(n, dtype=np.float32)
+        left = np.ascontiguousarray(buf[:, 0])
+        right = np.ascontiguousarray(buf[:, 1])
+        for stage in (self.eq, self.limiter):
+            if stage is None:
+                continue
+            stage.process(left, right, self._l, self._r)
+            left, right = self._l.copy(), self._r.copy()
+        buf[:, 0] = left
+        buf[:, 1] = right
+
+
 class _ReverbBase:
     """Mezcla wet/dry común a las reverbs: el plugin genera solo la cola y
     aquí se suma al dry. `amount` es la cantidad de wet; el dry se toca poco
@@ -1136,9 +1190,13 @@ class Engine:
         self.base_tempo = int(project.project.get("tempo", "125"))
         self.tempo = float(self.base_tempo)
         self.tempo_scale = 1.0
-        self.master = int(project.project.get("master", "100")) / 100.0
+        # `base_master` es el de la canción; `master` puede ajustarlo por
+        # configuración (robotraca.json) para igualar sonoridad entre temas.
+        self.base_master = int(project.project.get("master", "100")) / 100.0
+        self.master = self.base_master
         self.transpose = int(project.project.get("transpose", "0"))
         self.samples_per_tick = self._tick_samples()
+        self.master_chain: Optional["MasterChain"] = None
         self.bank = SampleBank(project.dir)
         self.instruments = {
             iid: parse_instrument(iid, ins["params"])
@@ -1337,14 +1395,19 @@ class Engine:
                 block[:, 0] *= min(1.0, 2.0 * (1.0 - x))
                 block[:, 1] *= min(1.0, 2.0 * x)
             out += block
-        # Pad sampler: suena directo (sin delay ni FX de canal)
+        out *= self.master
+        # Pad sampler: suena directo (sin delay ni FX de canal) y DESPUÉS del
+        # master, porque el banco es un instrumento de directo ajeno a la
+        # canción: si escalara con el master sonaría distinto en cada tema
+        # (con los masters igualados, hasta 4.6 dB de diferencia).
         pv = self.pad_voice
         if pv is not None:
             if pv.active:
                 pv.render(out, 0, frames)
             if not pv.active:
                 self.pad_voice = None
-        out *= self.master
+        if self.master_chain is not None:
+            self.master_chain.apply(out)
         np.clip(out, -1.0, 1.0, out=out)
         return out
 
