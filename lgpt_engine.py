@@ -40,6 +40,10 @@ SAMPLE_RATE = 44100
 CHANNEL_COUNT = 8
 TICKS_PER_STEP = 6          # AUDIO_SLICES_PER_STEP del upstream
 KRATE = 100                 # KRATE_SAMPLE_COUNT del upstream
+# Anti-click: micro-rampa al cortar una voz (nota nueva) o al saltar el
+# volumen de golpe (VOLM con velocidad 0). No es un efecto: solo evita el
+# chasquido del salto brusco de amplitud. ~4 ms es inaudible como fundido.
+DECLICK_SECONDS = 0.004
 
 # Pan law original (LittleGPTracker/sources/Application/Instruments/
 # SampleInstrumentDatas.h), 255 entradas en punto fijo 16.16.
@@ -219,12 +223,14 @@ class Voice:
         "loop_start", "loop_end", "loop_len",
         "base_speed", "cc_pitch",
         "lega_ratio", "lega_target", "lega_step",
+        "ptch_ratio", "ptch_target", "ptch_step",
+        "pfin_ratio", "pfin_target", "pfin_step",
         "vol_cur", "vol_target", "vol_kinc",
         "pan", "cc_vol", "cc_pan", "cc_cutoff",
         "crush", "drive_gain", "ds_shift", "attenuate",
         "f_active", "f_mix", "f_scream", "f_cut_base", "f_reso_base",
         "f_speed", "f_height", "f_delay",
-        "k_rem", "active", "_samples_per_tick",
+        "k_rem", "active", "_samples_per_tick", "declick", "releasing",
     )
 
     def __init__(self, sample: Sample, idef: InstrumentDef, note: int,
@@ -249,6 +255,14 @@ class Voice:
         self.lega_ratio = 1.0         # glide actual (multiplicador de speed)
         self.lega_target = 1.0
         self.lega_step: Optional[float] = None  # None = glide inactivo
+        # PTCH/PFIN: rampas de speed independientes (multiplican igual que
+        # LEGA). speedOffset del upstream = producto de todas las rampas.
+        self.ptch_ratio = 1.0         # transpose (2^(semis/12)), rampa geom.
+        self.ptch_target = 1.0
+        self.ptch_step: Optional[float] = None
+        self.pfin_ratio = 1.0         # afinado fino ±1 semitono
+        self.pfin_target = 1.0
+        self.pfin_step: Optional[float] = None
 
         self.vol_cur = float(idef.volume)     # dominio 0-255
         self.vol_target = float(idef.volume)
@@ -277,20 +291,29 @@ class Voice:
         self.active = True
 
         self._samples_per_tick = samples_per_tick
+        self.declick = max(1, int(DECLICK_SECONDS * out_sr))
+        self.releasing = False        # True = fade de salida al robar la voz
 
     # -- comandos ---------------------------------------------------------
 
     def set_volm(self, value: int):
-        """VOLM ssvv: rampa de volumen hacia vv; ss en unidades de 4 ticks."""
+        """VOLM ssvv: rampa de volumen hacia vv; ss en unidades de 4 ticks.
+        ss=0 en el upstream es instantáneo; aquí usamos una micro-rampa de
+        declick (~4 ms) para que el salto no chasquee."""
         target = float(value & 0xFF)
         ss = value >> 8
-        if ss == 0:
-            self.vol_cur = self.vol_target = target
-            self.vol_kinc = 0.0
-        else:
-            ramp_samples = ss * 4.0 * self._samples_per_tick
-            self.vol_kinc = (target - self.vol_cur) * KRATE / ramp_samples
-            self.vol_target = target
+        ramp_samples = self.declick if ss == 0 else ss * 4.0 * self._samples_per_tick
+        self.vol_kinc = (target - self.vol_cur) * KRATE / ramp_samples
+        self.vol_target = target
+
+    def start_release(self):
+        """Declick al robar la voz: fundido rápido a 0 (~4 ms) en vez de
+        cortar en seco. La voz se apaga sola al llegar a silencio."""
+        if self.releasing:
+            return
+        self.releasing = True
+        self.vol_target = 0.0
+        self.vol_kinc = -self.vol_cur * KRATE / self.declick
 
     def set_lega(self, value: int, last_note: int):
         """LEGA sspp: glide logarítmico. pp=0 => glide desde la última nota."""
@@ -313,6 +336,53 @@ class Voice:
             step = 1.0 + 0.5 / ss
             self.lega_step = step if target > init else 1.0 / step
 
+    def set_ptch(self, value: int):
+        """PTCH ssnn: transpone el sample nn semitonos (con signo) rampando
+        el speed hacia 2^(nn/12). ss=0 => instantáneo; ss alto => glissando
+        lento (LogSpeedRamp del upstream, aquí como rampa geométrica)."""
+        pitch = value & 0xFF
+        if pitch > 127:
+            pitch -= 256
+        ss = value >> 8
+        target = 2.0 ** (pitch / 12.0)
+        self.ptch_target = target
+        if ss == 0 or self.ptch_ratio == target:
+            self.ptch_ratio = target
+            self.ptch_step = None
+        else:
+            step = 1.0 + 0.5 / ss
+            self.ptch_step = step if target > self.ptch_ratio else 1.0 / step
+
+    def set_pfin(self, value: int):
+        """PFIN ssnn: afinado fino, nn/0x80 en el rango ±1 semitono, rampa
+        propia que se multiplica con PTCH/LEGA."""
+        semi = (value & 0xFF) / 128.0
+        if semi > 1:
+            semi -= 2
+        ss = value >> 8
+        target = 2.0 ** (semi / 12.0)
+        self.pfin_target = target
+        if ss == 0 or self.pfin_ratio == target:
+            self.pfin_ratio = target
+            self.pfin_step = None
+        else:
+            step = 1.0 + 0.5 / ss
+            self.pfin_step = step if target > self.pfin_ratio else 1.0 / step
+
+    def _ramp_arr(self, ratio: float, target: float, step, updates):
+        """Avanza una rampa geométrica (multiplicativa) sobre el bloque.
+        Devuelve (valor_por_sample, ratio_final, step_o_None). Si step es
+        None, el ratio es constante (escalar) y no hay coste vectorial."""
+        if step is None:
+            return ratio, ratio, None
+        arr = ratio * step ** updates
+        if step > 1.0:
+            arr = np.minimum(arr, target)
+        else:
+            arr = np.maximum(arr, target)
+        final = float(arr[-1])
+        return arr, final, (None if final == target else step)
+
     # -- render ------------------------------------------------------------
 
     def _kupdates(self, n: int) -> np.ndarray:
@@ -326,21 +396,20 @@ class Voice:
 
         updates = self._kupdates(n)
 
-        # Speed por sample (constante salvo glide LEGA activo)
-        if self.lega_step is not None:
-            ratio = self.lega_ratio * self.lega_step ** updates
-            if self.lega_step > 1.0:
-                ratio = np.minimum(ratio, self.lega_target)
-            else:
-                ratio = np.maximum(ratio, self.lega_target)
-            speed = self.base_speed * self.cc_pitch * ratio
+        # Speed por sample = base * cc_pitch * (LEGA * PTCH * PFIN). Cada
+        # rampa avanza a k-rate; si ninguna está activa es un escalar y se
+        # usa el camino lineal barato.
+        lega_arr, self.lega_ratio, self.lega_step = self._ramp_arr(
+            self.lega_ratio, self.lega_target, self.lega_step, updates)
+        ptch_arr, self.ptch_ratio, self.ptch_step = self._ramp_arr(
+            self.ptch_ratio, self.ptch_target, self.ptch_step, updates)
+        pfin_arr, self.pfin_ratio, self.pfin_step = self._ramp_arr(
+            self.pfin_ratio, self.pfin_target, self.pfin_step, updates)
+        speed = self.base_speed * self.cc_pitch * lega_arr * ptch_arr * pfin_arr
+        if isinstance(speed, np.ndarray):
             pos_arr = self.pos + np.cumsum(speed) - speed[0]
-            self.lega_ratio = float(ratio[-1])
-            if ratio[-1] == self.lega_target:
-                self.lega_step = None
-            end_pos = pos_arr[-1] + speed[-1]
+            end_pos = float(pos_arr[-1] + speed[-1])
         else:
-            speed = self.base_speed * self.cc_pitch * self.lega_ratio
             pos_arr = self.pos + speed * np.arange(n)
             end_pos = self.pos + speed * n
 
@@ -405,6 +474,8 @@ class Voice:
             self.k_rem += KRATE
         if not self.loop and self.pos >= self.end - 1:
             self.active = False
+        if self.releasing and self.vol_cur <= 0.5:
+            self.active = False        # fin del declick: silencio
 
     def _render_filter(self, x: np.ndarray):
         """Filtro LP del upstream (Filters.cpp + bucle inline de
@@ -870,7 +941,7 @@ EFFECT_PRESETS = {
 class Channel:
     __slots__ = (
         "idx", "song_pos", "chain_pos", "phrase_pos", "chain", "phrase",
-        "playing", "time_to_start", "time_to_live", "voice",
+        "playing", "time_to_start", "time_to_live", "voice", "release",
         "last_instr", "last_note", "table",
         "cc_vol", "cc_pan", "cc_pitch", "cc_cutoff",
         "kind", "midi_def", "midi_note", "midi_ticks", "midi_vel",
@@ -889,6 +960,7 @@ class Channel:
         self.time_to_start = 0
         self.time_to_live = 0
         self.voice: Optional[Voice] = None
+        self.release: Optional[Voice] = None   # voz anterior en fundido (declick)
         self.last_instr: Optional[int] = None
         self.last_note = 0
         self.table = TablePlayback()
@@ -1087,6 +1159,14 @@ class Engine:
                                 v.render(self._stage[ch.idx], off, n)
                             if not v.active:
                                 ch.voice = None
+                        r = ch.release      # voz anterior en fundido (declick)
+                        if r is not None:
+                            if r.active:
+                                r.cc_vol = 1.0
+                                r.cc_pan = None
+                                r.render(self._stage[ch.idx], off, n)
+                            if not r.active:
+                                ch.release = None
                     off += n
                     self.tick_phase -= n
                 if self.tick_phase < 1.0:
@@ -1253,7 +1333,7 @@ class Engine:
             if ch.time_to_live > 0:
                 ch.time_to_live -= 1
                 if ch.time_to_live == 0:
-                    ch.voice = None
+                    self._cut_voice(ch)      # KILL con declick
                     self._midi_stop_note(ch)
         for ch in self.channels:
             if ch.midi_ticks > 0:
@@ -1366,9 +1446,18 @@ class Engine:
         else:
             self._set_phrase_pos(ch, hop if hop >= 0 else 0)
 
+    def _cut_voice(self, ch: Channel):
+        """Corta la voz sample actual con declick: la pasa a fundido de
+        salida (ch.release) en vez de silenciarla en seco."""
+        v = ch.voice
+        if v is not None and v.active:
+            v.start_release()
+            ch.release = v          # descarta un release previo (raro: notas < 4 ms)
+        ch.voice = None
+
     def _stop_channel(self, ch: Channel):
         ch.playing = False
-        ch.voice = None
+        self._cut_voice(ch)
         self._midi_stop_note(ch)
 
     # -- instrumentos MIDI ----------------------------------------------------
@@ -1430,8 +1519,8 @@ class Engine:
         final = (note + t + self.transpose) % 256
         if final >= 128:
             return
-        # Monofonía: corta la voz sample y/o la nota MIDI anteriores
-        ch.voice = None
+        # Monofonía: corta la voz sample (con declick) y/o la nota MIDI
+        self._cut_voice(ch)
         self._midi_stop_note(ch)
         if idef is not None:
             sample = self.bank.get(idef.sample_name)
@@ -1492,7 +1581,7 @@ class Engine:
                     self._set_groove(c, groove)
             else:
                 self._set_groove(ch, groove)
-        elif cmd in ("VOLM", "LEGA", "MDCC", "MDPG", "MVEL"):
+        elif cmd in ("VOLM", "LEGA", "PTCH", "PFIN", "MDCC", "MDPG", "MVEL"):
             self._instrument_command(ch, cmd, param)
         else:
             self.unsupported_cmds.add(cmd)
@@ -1503,6 +1592,10 @@ class Engine:
                 ch.voice.set_volm(param)
             elif cmd == "LEGA":
                 ch.voice.set_lega(param, ch.last_note)
+            elif cmd == "PTCH":
+                ch.voice.set_ptch(param)
+            elif cmd == "PFIN":
+                ch.voice.set_pfin(param)
         elif ch.kind == "midi" and ch.midi_def is not None:
             # MidiInstrument::ProcessCommand del upstream
             mch = ch.midi_def.channel

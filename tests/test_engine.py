@@ -159,13 +159,15 @@ class TestVoices(unittest.TestCase):
         engine = make_engine()
         note_row(engine.project, 0)
         engine.project.cmd1[0] = "VOLM"
-        engine.project.param1[0] = 0x0000  # volumen 0 inmediato
+        engine.project.param1[0] = 0x0000  # volumen 0 con micro-rampa de declick
         engine._process_tick()
         voice = engine.channels[0].voice
         self.assertIsNotNone(voice)
-        self.assertEqual(voice.vol_cur, 0.0)
-        out = engine.render(512)
-        self.assertEqual(float(np.abs(out).max()), 0.0)
+        # declick: no salta a 0 de golpe, baja en ~4 ms
+        self.assertGreater(voice.vol_cur, 0.0)
+        out = engine.render(512)           # 512 > declick (~176): completa el fundido
+        self.assertLessEqual(voice.vol_cur, 0.5)
+        self.assertEqual(float(np.abs(out[-1]).max()), 0.0)  # cola en silencio
 
     def test_dlay(self):
         engine = make_engine()
@@ -204,7 +206,8 @@ class TestVoices(unittest.TestCase):
         engine._process_tick()             # trigger + tabla fila 0
         voice = engine.channels[0].voice
         self.assertIsNotNone(voice)
-        self.assertEqual(voice.vol_cur, 0.0)
+        engine.render(512)                 # completa la micro-rampa de declick
+        self.assertLessEqual(voice.vol_cur, 0.5)
 
     def test_midi_cc_events(self):
         engine = make_engine()
