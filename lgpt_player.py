@@ -484,6 +484,7 @@ class Player:
         self.recorder: WavRecorder | None = None
         self._notice: tuple | None = None   # (mensaje, timestamp) para la UI
         self.streamer: TcpStreamer | None = None
+        self._expected_dac_time: float | None = None  # reloj real esperado
         self.stream = sd.OutputStream(
             samplerate=args.samplerate,
             channels=2,
@@ -497,6 +498,15 @@ class Player:
 
     def _audio_callback(self, outdata, frames, time_info, status):
         engine = self.engine_ref.get("engine")
+        dac_time = time_info.outputBufferDacTime
+        if engine is not None:
+            expected = self._expected_dac_time
+            if expected is not None:
+                drift = dac_time - expected
+                if drift > 0.002:      # >2ms: xrun real, no ruido de reloj
+                    engine.catch_up(drift)
+                    self._set_notice(f"glitch recuperado ({drift * 1000:.0f}ms)")
+        self._expected_dac_time = dac_time + frames / self.args.samplerate
         if engine is None:
             outdata[:] = 0
         else:
