@@ -10,6 +10,7 @@
     "pot6": "2:suboctave",
     "pot4": "1,2:space:24",
     "pot3": "4:flanger",
-    "pot7": "4:chopper"
+    "pot7": "4:chopper",
+    "pot8": "0:tempo"
   }
 }

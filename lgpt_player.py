@@ -690,7 +690,11 @@ class Player:
                 continue
             self.args.pots.append((spec, target, idx))
             chans, name, _scale = target
-            self.pot_labels[idx] = (",".join(str(c + 1) for c in chans), name)
+            # `tempo` es global a la canción: el canal del target no pinta
+            # nada, así que en el visor se marca con * en vez de un número.
+            pistas = "*" if name == "tempo" else \
+                ",".join(str(c + 1) for c in chans)
+            self.pot_labels[idx] = (pistas, name)
 
     # -- UI curses --------------------------------------------------------------
 
@@ -831,7 +835,7 @@ class Player:
         else:
             sym, cpair = "II", 5
         name = display_name(engine.project.dir.name)
-        head = f"{sym} {name}  {engine.tempo}BPM"
+        head = f"{sym} {name}  {engine.tempo:.0f}BPM"
         scr.addstr(0, 1, head[:w - 2], curses.color_pair(cpair) | curses.A_BOLD)
 
         rows = h - 1                         # filas para barras (fila 0 = cabecera)
@@ -930,7 +934,7 @@ class Player:
         scr.addstr(0, 7, engine.project.dir.name[:w - 8],
                    curses.color_pair(1) | curses.A_BOLD)
         if wide:
-            scr.addstr(0, 30, f"{engine.tempo} BPM  fila {row:02X}  "
+            scr.addstr(0, 30, f"{engine.tempo:.0f} BPM  fila {row:02X}  "
                               f"{meter(row / 255, 12)}"[:w - 31])
         for ch in engine.channels:
             y = 2 + ch.idx

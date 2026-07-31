@@ -10,7 +10,8 @@
     "pot5": "2:flanger",
     "pot2": "5:flanger",
     "pot6": "5:beat_delay",
-    "pot4": "2:space:24"
+    "pot4": "2:space:24",
+    "pot8": "0:tempo"
   },
   "pad_volume": {
     "1": 25,

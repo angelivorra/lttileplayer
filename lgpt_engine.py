@@ -44,6 +44,9 @@ KRATE = 100                 # KRATE_SAMPLE_COUNT del upstream
 # volumen de golpe (VOLM con velocidad 0). No es un efecto: solo evita el
 # chasquido del salto brusco de amplitud. ~4 ms es inaudible como fundido.
 DECLICK_SECONDS = 0.004
+# Tope de aceleración del knob de tempo. Las canciones ya van rápidas, así
+# que interesa que se note sin desmadrarse: +12% son 180->202 BPM.
+TEMPO_BOOST_MAX = 0.12
 
 # Pan law original (LittleGPTracker/sources/Application/Instruments/
 # SampleInstrumentDatas.h), 255 entradas en punto fijo 16.16.
@@ -1128,13 +1131,14 @@ class Engine:
             project.load()
         self.project = project
         self.sr = sample_rate
-        self.tempo = int(project.project.get("tempo", "125"))
+        # `tempo` es el efectivo (el que se oye y el que ven los efectos
+        # sincronizados); `base_tempo` es el de la canción, sin acelerar.
+        self.base_tempo = int(project.project.get("tempo", "125"))
+        self.tempo = float(self.base_tempo)
+        self.tempo_scale = 1.0
         self.master = int(project.project.get("master", "100")) / 100.0
         self.transpose = int(project.project.get("transpose", "0"))
-        # SyncMaster::SetTempo del upstream
-        self.samples_per_tick = (
-            60.0 * self.sr * 2.0 / self.tempo / 8.0 / TICKS_PER_STEP
-        )
+        self.samples_per_tick = self._tick_samples()
         self.bank = SampleBank(project.dir)
         self.instruments = {
             iid: parse_instrument(iid, ins["params"])
@@ -1240,6 +1244,22 @@ class Engine:
     def push_event(self, *event):
         """Encola un evento externo (MIDI, teclado). Thread-safe."""
         self.events.put(event)
+
+    # SyncMaster::SetTempo del upstream
+    def _tick_samples(self) -> float:
+        return 60.0 * self.sr * 2.0 / self.tempo / 8.0 / TICKS_PER_STEP
+
+    def set_tempo_scale(self, scale: float):
+        """Acelera el secuenciador sobre el tempo de la canción (knob de
+        tempo). Solo cambia el reloj de pasos: los samples siguen sonando a
+        su pitch, como al subir el tempo en el propio tracker. El siguiente
+        tick ya usa el valor nuevo, así que no hay salto."""
+        scale = min(max(scale, 1.0), 1.0 + TEMPO_BOOST_MAX)
+        if scale == self.tempo_scale:
+            return
+        self.tempo_scale = scale
+        self.tempo = self.base_tempo * scale
+        self.samples_per_tick = self._tick_samples()
 
     # -- render --------------------------------------------------------------
 
@@ -1429,6 +1449,9 @@ class Engine:
             ch.cc_pitch = 2.0 ** ((val - 64) / 64.0)
         elif name == "cutoff":
             ch.cc_cutoff = val / 127.0
+        elif name == "tempo":
+            # global a la canción: el canal del target se ignora
+            self.set_tempo_scale(1.0 + (val / 127.0) * TEMPO_BOOST_MAX)
         elif name in EFFECT_PRESETS:
             ch.fx_amounts[name] = val / 127.0
 
