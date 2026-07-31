@@ -65,20 +65,20 @@ class TestMatchButton(unittest.TestCase):
 class TestMatchPot(unittest.TestCase):
     def setUp(self):
         self.pots = [
-            (parse_button_spec("cc:9:16"), (2, "lp_cutoff"), 0),
-            (parse_button_spec("cc:9:17"), (2, "lp_res"), 4),
-            (parse_button_spec("cc:9:18"), (None, "volume"), 7),  # canal via MIDI
+            (parse_button_spec("cc:9:16"), ((2,), "lp_cutoff", 1.0), 0),
+            (parse_button_spec("cc:9:17"), ((2,), "lp_res", 1.0), 4),
+            (parse_button_spec("cc:9:18"), (None, "volume", 1.0), 7),  # canal via MIDI
         ]
 
     def test_pot_match(self):
         msg = mido.Message("control_change", channel=9, control=16, value=80)
-        self.assertEqual(match_pot(self.pots, msg), (2, "lp_cutoff", 0))
+        self.assertEqual(match_pot(self.pots, msg), ((2,), "lp_cutoff", 0, 1.0))
         msg = mido.Message("control_change", channel=9, control=17, value=80)
-        self.assertEqual(match_pot(self.pots, msg), (2, "lp_res", 4))
+        self.assertEqual(match_pot(self.pots, msg), ((2,), "lp_res", 4, 1.0))
 
     def test_pot_channel_from_midi(self):
         msg = mido.Message("control_change", channel=9, control=18, value=80)
-        self.assertEqual(match_pot(self.pots, msg), (9 % 8, "volume", 7))
+        self.assertEqual(match_pot(self.pots, msg), ((9 % 8,), "volume", 7, 1.0))
 
     def test_pot_no_match(self):
         msg = mido.Message("control_change", channel=9, control=19, value=80)
@@ -91,8 +91,18 @@ class TestMatchPot(unittest.TestCase):
 
 class TestParsePotTarget(unittest.TestCase):
     def test_valid(self):
-        self.assertEqual(parse_pot_target("2:lp_cutoff"), (2, "lp_cutoff"))
-        self.assertEqual(parse_pot_target("0:volume"), (0, "volume"))
+        self.assertEqual(parse_pot_target("2:lp_cutoff"),
+                         ((2,), "lp_cutoff", 1.0))
+        self.assertEqual(parse_pot_target("0:volume"), ((0,), "volume", 1.0))
+
+    def test_varios_canales(self):
+        self.assertEqual(parse_pot_target("1,2:reverb"),
+                         ((1, 2), "reverb", 1.0))
+
+    def test_tope(self):
+        # el knob solo recorre hasta el 35% del efecto
+        self.assertEqual(parse_pot_target("1,2:reverb:35"),
+                         ((1, 2), "reverb", 0.35))
 
     def test_invalid(self):
         self.assertIsNone(parse_pot_target(""))
@@ -100,6 +110,9 @@ class TestParsePotTarget(unittest.TestCase):
         self.assertIsNone(parse_pot_target("2:"))
         self.assertIsNone(parse_pot_target("x:volume"))
         self.assertIsNone(parse_pot_target(None))
+        self.assertIsNone(parse_pot_target("1,9:reverb"))  # canal fuera
+        self.assertIsNone(parse_pot_target("1:reverb:0"))  # tope inválido
+        self.assertIsNone(parse_pot_target("1:reverb:x"))
 
 
 class TestWavRecorder(unittest.TestCase):

@@ -864,6 +864,64 @@ class FlangerFx:
             self.plugin.run(buf)
 
 
+class ReverbFx:
+    """Reverb de placa, pensada para dejarla fija y sutil (ver `fx` en
+    robotraca.json), no tanto para barrer con un knob: rellena el hueco
+    entre nota y nota para que el cambio no suene tan seco.
+
+    `amount` es la mezcla wet; el nivel se compensa bajando el dry para que
+    subirla no dispare el volumen del canal. Sin el plugin LADSPA cae a un
+    peine de retardos con realimentación (más pobre, pero suficiente para
+    dar cola).
+    """
+
+    _TIME_S = 1.6           # cola corta: da aire sin emborronar el ritmo
+    _DAMPING = 0.35
+
+    def __init__(self, sr: int):
+        self.sr = sr
+        self._l = np.zeros(0, dtype=np.float32)
+        self._r = np.zeros(0, dtype=np.float32)
+        try:
+            from ladspa_fx import LadspaPlate
+            self.plugin = LadspaPlate(sr)
+            self.plugin.set(self._TIME_S, self._DAMPING)
+        except Exception:
+            self.plugin = None
+            # Fallback: peine de 4 retardos primos entre sí (evita que las
+            # repeticiones coincidan y suenen a eco metálico).
+            self._taps = [int(sr * t) for t in (0.0297, 0.0371, 0.0411, 0.0437)]
+            self._ring = np.zeros((max(self._taps) + 1, 2), dtype=np.float32)
+            self._pos = 0
+
+    def apply(self, buf: np.ndarray, amount: float):
+        if amount <= 0.001:
+            return
+        wet_gain = 0.9 * amount
+        dry_gain = 1.0 - 0.5 * amount        # compensa el nivel al subir wet
+        n = len(buf)
+        if self.plugin is not None:
+            if len(self._l) != n:
+                self._l = np.zeros(n, dtype=np.float32)
+                self._r = np.zeros(n, dtype=np.float32)
+            mono = np.ascontiguousarray((buf[:, 0] + buf[:, 1]) * 0.5)
+            self.plugin.wet(mono, self._l, self._r)
+            buf *= dry_gain
+            buf[:, 0] += self._l * wet_gain
+            buf[:, 1] += self._r * wet_gain
+            return
+        ring, d = self._ring, len(self._ring)
+        pos = self._pos
+        wet = np.zeros_like(buf)
+        idx = (pos + np.arange(n)) % d
+        for k, tap in enumerate(self._taps):
+            wet += ring[(idx - tap) % d] * (0.7 ** k)
+        ring[idx] = buf + wet * 0.45
+        self._pos = (pos + n) % d
+        buf *= dry_gain
+        buf += wet * (wet_gain * 0.5)
+
+
 class BeatDelayFx:
     """Delay sincronizado al tempo: el eco cae exactamente cada negra del
     tempo de la canción (no del reloj de pared). El knob controla la
@@ -941,6 +999,7 @@ EFFECT_PRESETS = {
     "tape_delay": TapeDelayFx,
     "beat_delay": BeatDelayFx,
     "acid_lp": AcidLpFx,
+    "reverb": ReverbFx,
 }
 
 

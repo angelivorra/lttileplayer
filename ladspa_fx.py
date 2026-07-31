@@ -620,6 +620,38 @@ class LadspaStereoRetroFlange:
         buf[:, 1] = right
 
 
+PLATE_PATH = "/usr/lib/ladspa/plate_1423.so"
+PLATE_ID = 1423
+PLATE_TIME, PLATE_DAMPING, PLATE_MIX = 0, 1, 2
+PLATE_IN, PLATE_OUT_L, PLATE_OUT_R = 3, 4, 5
+
+
+class LadspaPlate(LadspaPlugin):
+    """Reverb de placa (plate_1423.so): entrada mono, salida estéreo.
+
+    No usa LadspaPlugin.run() porque ese conecta el mismo buffer a entrada y
+    salida (in-place) y aquí los puertos son distintos: 1 entrada y 2 salidas.
+    """
+
+    def __init__(self, sample_rate: int, path: str = PLATE_PATH):
+        super().__init__(path, PLATE_ID, sample_rate)
+        self.set_control(PLATE_MIX, 1.0)   # 100% wet: la mezcla la hacemos aquí
+
+    def set(self, time_s: float, damping: float):
+        self.set_control(PLATE_TIME, time_s)
+        self.set_control(PLATE_DAMPING, damping)
+
+    def wet(self, mono: np.ndarray, out_l: np.ndarray, out_r: np.ndarray):
+        """Cola de reverb de `mono` en out_l/out_r (buffers contiguos)."""
+        self._connect(self._handle, PLATE_IN,
+                      mono.ctypes.data_as(ctypes.c_void_p))
+        self._connect(self._handle, PLATE_OUT_L,
+                      out_l.ctypes.data_as(ctypes.c_void_p))
+        self._connect(self._handle, PLATE_OUT_R,
+                      out_r.ctypes.data_as(ctypes.c_void_p))
+        self._run(self._handle, len(mono))
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100

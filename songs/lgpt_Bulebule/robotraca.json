@@ -1,9 +1,15 @@
 {
-  "mute": [5, 6],
+  "mute": [
+    5,
+    6
+  ],
   "pots": {
-    "pot1": "1:suboctave",
-    "pot5": "1:acid_lp",
-    "pot2": "4:flanger",
-    "pot6": "4:beat_delay"
+    "pot1": "1:flanger",
+    "pot5": "1:ringmod",
+    "pot2": "2:suboctave",
+    "pot6": "2:acid_lp",
+    "pot3": "4:flanger",
+    "pot7": "4:chopper",
+    "pot4": "1,2:reverb:35"
   }
 }

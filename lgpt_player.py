@@ -269,23 +269,56 @@ def match_button(mapping: dict, msg) -> str | None:
 
 
 def parse_pot_target(target: str) -> tuple | None:
-    """'canal:parametro' -> (canal, parametro); None si no es válido."""
+    """'canales:parametro[:tope]' -> (canales, parametro, escala).
+
+    canales: uno o varios separados por coma (`2` o `1,2`), canal tracker
+    0-7; un mismo knob puede así mover varias pistas a la vez (p.ej. la
+    reverb de todos los bajos).
+    tope: recorrido máximo del knob en % (100 por defecto). Sirve para dejar
+    un efecto en una zona discreta: `1,2:reverb:35` = de 0 a 35%.
+    Devuelve None si no es válido.
+    """
     try:
-        ch, name = target.split(":")
-        ch = int(ch)
-    except (ValueError, AttributeError):
+        parts = target.split(":")
+    except AttributeError:
         return None
-    if not 0 <= ch < 8 or not name:
+    if len(parts) == 2:
+        chans_str, name = parts
+        scale = 1.0
+    elif len(parts) == 3:
+        chans_str, name, top = parts
+        try:
+            scale = float(top) / 100.0
+        except ValueError:
+            return None
+        if not 0.0 < scale <= 1.0:
+            return None
+    else:
         return None
-    return (ch, name)
+    if not name:
+        return None
+    chans = []
+    for c in chans_str.split(","):
+        try:
+            ci = int(c)
+        except ValueError:
+            return None
+        if not 0 <= ci < 8:
+            return None
+        chans.append(ci)
+    if not chans:
+        return None
+    return (tuple(chans), name, scale)
 
 
 def match_pot(pots: list, msg) -> tuple | None:
-    """Devuelve (canal, parámetro, nº de knob 0-7) del pot que coincide.
+    """Devuelve (canales, parámetro, nº de knob 0-7, escala) del pot que
+    coincide con el mensaje, o None.
 
-    pots: lista de (spec, target, idx) donde target es (canal|None, param);
-    canal None = se deriva del canal MIDI del mensaje (% 8). `idx` es el
-    knob físico (pot1 -> 0), necesario para pintarlo en el visor."""
+    pots: lista de (spec, target, idx) con target de parse_pot_target
+    (canales|None, param, escala); canales None = se deriva del canal MIDI
+    del mensaje (% 8). `idx` es el knob físico (pot1 -> 0), necesario para
+    pintarlo en el visor."""
     if msg.type != "control_change":
         return None
     for spec, target, idx in pots:
@@ -294,8 +327,10 @@ def match_pot(pots: list, msg) -> tuple | None:
         mtype, ch, num = spec
         if mtype == "control_change" and msg.channel == ch \
                 and msg.control == num:
-            tch, tparam = target
-            return (msg.channel % 8 if tch is None else tch), tparam, idx
+            chans, tparam, scale = target
+            if chans is None:
+                chans = (msg.channel % 8,)
+            return chans, tparam, idx, scale
     return None
 
 
@@ -350,8 +385,10 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
         if pots:
             hit = match_pot(pots, msg)
             if hit is not None:
-                tch, tparam, idx = hit
-                engine.push_event("param", tch, tparam, msg.value)
+                chans, tparam, idx, scale = hit
+                value = int(round(msg.value * scale))
+                for tch in chans:
+                    engine.push_event("param", tch, tparam, value)
                 values = engine_ref.get("pot_values")
                 if values is not None:
                     values[idx] = msg.value     # solo para el visor
@@ -603,6 +640,21 @@ class Player:
             engine.pad_volume_map = {}
             engine.pad_volume_default = float(pv) / 100
         # targets por canción sobre el mapeo físico global de knobs
+        # Efectos fijos por canal, siempre activos y sin gastar un knob:
+        #   "fx": {"2": {"reverb": 15}}   (canal tracker 0-7, cantidad 0-100)
+        # Si un knob apunta al mismo efecto y canal, al moverlo manda el knob.
+        for ch_key, effects in (song_cfg.get("fx") or {}).items():
+            try:
+                ci = int(ch_key)
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= ci < len(engine.channels) or not isinstance(effects, dict):
+                continue
+            for name, amount in effects.items():
+                if name in EFFECT_PRESETS:
+                    engine.channels[ci].fx_amounts[name] = float(amount) / 100.0
+                else:
+                    print(f"[config] efecto desconocido: {name}")
         song_pots = song_cfg.get("pots", {})
         self.args.pots.clear()
         self.pot_labels = [None] * 8       # (nº pista, efecto) por knob activo
@@ -620,7 +672,8 @@ class Player:
             if not 0 <= idx < 8:
                 continue
             self.args.pots.append((spec, target, idx))
-            self.pot_labels[idx] = (target[0] + 1, target[1])
+            chans, name, _scale = target
+            self.pot_labels[idx] = (",".join(str(c + 1) for c in chans), name)
 
     # -- UI curses --------------------------------------------------------------
 
