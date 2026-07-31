@@ -72,12 +72,23 @@ aproximación en numpy puro — así el código es portable a una Pi sin los
 un efecto, mantener ese patrón (plugin real + fallback) y evitar que el
 `amount` dispare el volumen (todos compensan nivel al subir).
 
+## Canciones: carpeta `songs/` del repo
+
+Las canciones de trabajo viven en `songs/` **dentro del repo** (`lgpt_<nombre>/`
+con su `lgptsav.dat`, `samples/` y `robotraca.json`) — misma fuente para el PC
+de desarrollo y para la Pi. `songs_dir` en el toml es **relativo** (`"songs"`),
+se resuelve contra la carpeta del programa, así el mismo config vale en ambos.
+Los WAV (`samples/`, `mixdown.wav`) están gitignored (`*.wav`); git solo
+versiona `lgptsav.dat` + `robotraca.json`. El deploy sincroniza los WAV.
+Igual con el banco de pads: `wavs_dir = "wavs"` (relativo, carpeta `wavs/`).
+
 ## Config por canción: `robotraca.json`
 
-Vive en la carpeta del proyecto LGPT (`lgpt_<nombre>/robotraca.json`), junto
-a `lgptsav.dat`. Claves: `mute` (lista de canales 0-7 siempre silenciados),
-`pad_volume` (número o dict por pad), `pots` (targets, ver arriba). Ausente
-= sin mute y sin efectos.
+Vive junto a `lgptsav.dat` (`songs/lgpt_<nombre>/robotraca.json`). Claves:
+`mute` (lista de canales 0-7 siempre silenciados), `pad_volume` (número o
+dict por pad), `pots` (targets, ver arriba). Ausente = sin mute y sin
+efectos. Ojo: el `[channels] mute` del toml NO se aplica en runtime; el mute
+efectivo es el de `robotraca.json`.
 
 ## Convenciones del repo
 

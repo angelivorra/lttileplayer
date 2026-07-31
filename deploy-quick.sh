@@ -16,9 +16,9 @@ set -euo pipefail
 
 PI="${1:-Lgpt}"
 APP=/home/angel/lttileplayer
-SONGS_DST=/home/angel/Documentos/canciones
-SONGS_SRC="${SONGS_SRC:-/home/angel/LGPT/songs}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SONGS_DST="$APP/songs"
+SONGS_SRC="${SONGS_SRC:-$HERE/songs}"
 
 echo "==> Código -> $PI:$APP"
 rsync -a \
