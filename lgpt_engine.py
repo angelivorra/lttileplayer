@@ -859,37 +859,42 @@ class FlangerFx:
             self.plugin = None
 
     def apply(self, buf: np.ndarray, amount: float):
-        if self.plugin is not None:
-            self.plugin.set(8.0 * amount, 0.3 + 1.2 * amount)
-            self.plugin.run(buf)
+        # El plugin procesa al 100% wet, así que la mezcla seco/procesado la
+        # hacemos aquí: sin ella el efecto entraba de golpe en el primer
+        # cuarto del knob y el resto del recorrido no aportaba nada. Además
+        # el barrido de peine solo se oye si queda algo de señal seca con la
+        # que interferir.
+        if self.plugin is None or amount <= 0.001:
+            return
+        dry = buf.copy()
+        self.plugin.set(6.0 * amount, 0.3 + 0.7 * amount)
+        self.plugin.run(buf)
+        buf *= amount
+        buf += dry * (1.0 - amount)
 
 
-class ReverbFx:
-    """Reverb de placa, pensada para dejarla fija y sutil (ver `fx` en
-    robotraca.json), no tanto para barrer con un knob: rellena el hueco
-    entre nota y nota para que el cambio no suene tan seco.
-
-    `amount` es la mezcla wet; el nivel se compensa bajando el dry para que
-    subirla no dispare el volumen del canal. Sin el plugin LADSPA cae a un
-    peine de retardos con realimentación (más pobre, pero suficiente para
-    dar cola).
+class _ReverbBase:
+    """Mezcla wet/dry común a las reverbs: el plugin genera solo la cola y
+    aquí se suma al dry. `amount` es la cantidad de wet; el dry se toca poco
+    (si se recorta mucho, subir el knob solo se percibe como bajar volumen).
+    Sin el plugin LADSPA cae a un peine de 4 retardos primos entre sí (más
+    pobre, pero da cola).
     """
 
-    _TIME_S = 1.6           # cola corta: da aire sin emborronar el ritmo
-    _DAMPING = 0.35
+    _WET_GAIN = 1.0        # calibrado por reverb: el nivel de cola varía mucho
+    _DRY_DUCK = 0.25
+
+    def _make_plugin(self, sr):
+        raise NotImplementedError
 
     def __init__(self, sr: int):
         self.sr = sr
         self._l = np.zeros(0, dtype=np.float32)
         self._r = np.zeros(0, dtype=np.float32)
         try:
-            from ladspa_fx import LadspaPlate
-            self.plugin = LadspaPlate(sr)
-            self.plugin.set(self._TIME_S, self._DAMPING)
+            self.plugin = self._make_plugin(sr)
         except Exception:
             self.plugin = None
-            # Fallback: peine de 4 retardos primos entre sí (evita que las
-            # repeticiones coincidan y suenen a eco metálico).
             self._taps = [int(sr * t) for t in (0.0297, 0.0371, 0.0411, 0.0437)]
             self._ring = np.zeros((max(self._taps) + 1, 2), dtype=np.float32)
             self._pos = 0
@@ -897,8 +902,8 @@ class ReverbFx:
     def apply(self, buf: np.ndarray, amount: float):
         if amount <= 0.001:
             return
-        wet_gain = 0.9 * amount
-        dry_gain = 1.0 - 0.5 * amount        # compensa el nivel al subir wet
+        wet_gain = self._WET_GAIN * amount
+        dry_gain = 1.0 - self._DRY_DUCK * amount
         n = len(buf)
         if self.plugin is not None:
             if len(self._l) != n:
@@ -919,7 +924,46 @@ class ReverbFx:
         ring[idx] = buf + wet * 0.45
         self._pos = (pos + n) % d
         buf *= dry_gain
-        buf += wet * (wet_gain * 0.5)
+        buf += wet * (wet_gain * 0.3)
+
+
+class ReverbFx(_ReverbBase):
+    """Reverb de placa: cola corta, para quitar sequedad sin llamar la
+    atención. La cola del plugin sale a ~0.3 del nivel de entrada, de ahí
+    la ganancia alta del wet."""
+
+    _WET_GAIN = 1.8
+    _TIME_S = 1.6
+    _DAMPING = 0.35
+
+    def _make_plugin(self, sr):
+        from ladspa_fx import LadspaPlate
+        p = LadspaPlate(sr)
+        p.set(self._TIME_S, self._DAMPING)
+        return p
+
+
+class SpaceFx(_ReverbBase):
+    """Reverb de sala grande (GVerb): mucho más espacial que la de placa
+    — cola de ~2 s y estéreo amplio. Su salida es ~1.9x la entrada, así que
+    el wet necesita bastante menos ganancia que en `reverb`."""
+
+    # Calibrado para que a tope se note de verdad: el dry baja a la mitad y
+    # la cola pesa ~2x la señal original (respuesta lineal con el knob).
+    _WET_GAIN = 1.0
+    _DRY_DUCK = 0.5
+    _ROOM_M = 60.0
+    _TIME_S = 4.0
+    _DAMPING = 0.5
+    _BANDWIDTH = 0.75
+    _EARLY_DB = -10.0
+
+    def _make_plugin(self, sr):
+        from ladspa_fx import LadspaGVerb
+        p = LadspaGVerb(sr)
+        p.set(self._ROOM_M, self._TIME_S, self._DAMPING,
+              self._BANDWIDTH, self._EARLY_DB)
+        return p
 
 
 class BeatDelayFx:
@@ -1000,6 +1044,7 @@ EFFECT_PRESETS = {
     "beat_delay": BeatDelayFx,
     "acid_lp": AcidLpFx,
     "reverb": ReverbFx,
+    "space": SpaceFx,
 }
 
 

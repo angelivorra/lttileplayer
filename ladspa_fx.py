@@ -652,6 +652,44 @@ class LadspaPlate(LadspaPlugin):
         self._run(self._handle, len(mono))
 
 
+GVERB_PATH = "/usr/lib/ladspa/gverb_1216.so"
+GVERB_ID = 1216
+(GVERB_ROOM, GVERB_TIME, GVERB_DAMP, GVERB_BW,
+ GVERB_DRY, GVERB_EARLY, GVERB_TAIL) = range(7)
+GVERB_IN, GVERB_OUT_L, GVERB_OUT_R = 7, 8, 9
+
+
+class LadspaGVerb(LadspaPlugin):
+    """Reverb de sala (gverb_1216.so): entrada mono, salida estéreo.
+
+    Más espacial que el plate: tamaño de sala en metros y control aparte de
+    reflexiones tempranas y cola. El nivel dry se deja al mínimo porque la
+    mezcla wet/dry la hacemos nosotros.
+    """
+
+    def __init__(self, sample_rate: int, path: str = GVERB_PATH):
+        super().__init__(path, GVERB_ID, sample_rate)
+        self.set_control(GVERB_DRY, -90.0)     # sin dry: lo mezclamos aquí
+        self.set_control(GVERB_TAIL, 0.0)
+
+    def set(self, room_m: float, time_s: float, damping: float,
+            bandwidth: float, early_db: float):
+        self.set_control(GVERB_ROOM, room_m)
+        self.set_control(GVERB_TIME, time_s)
+        self.set_control(GVERB_DAMP, damping)
+        self.set_control(GVERB_BW, bandwidth)
+        self.set_control(GVERB_EARLY, early_db)
+
+    def wet(self, mono: np.ndarray, out_l: np.ndarray, out_r: np.ndarray):
+        self._connect(self._handle, GVERB_IN,
+                      mono.ctypes.data_as(ctypes.c_void_p))
+        self._connect(self._handle, GVERB_OUT_L,
+                      out_l.ctypes.data_as(ctypes.c_void_p))
+        self._connect(self._handle, GVERB_OUT_R,
+                      out_r.ctypes.data_as(ctypes.c_void_p))
+        self._run(self._handle, len(mono))
+
+
 if __name__ == "__main__":
     # Autotest: ruido blanco -> con cutoff bajo debe atenuarse mucho
     sr = 44100

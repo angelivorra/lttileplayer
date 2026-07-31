@@ -5,11 +5,11 @@
   ],
   "pots": {
     "pot1": "1:flanger",
-    "pot5": "1:ringmod",
-    "pot2": "2:suboctave",
-    "pot6": "2:acid_lp",
+    "pot5": "1:suboctave",
+    "pot2": "2:flanger",
+    "pot6": "2:suboctave",
+    "pot4": "1,2:space:24",
     "pot3": "4:flanger",
-    "pot7": "4:chopper",
-    "pot4": "1,2:reverb:35"
+    "pot7": "4:chopper"
   }
 }
