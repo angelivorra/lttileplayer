@@ -65,20 +65,20 @@ class TestMatchButton(unittest.TestCase):
 class TestMatchPot(unittest.TestCase):
     def setUp(self):
         self.pots = [
-            (parse_button_spec("cc:9:16"), (2, "lp_cutoff")),
-            (parse_button_spec("cc:9:17"), (2, "lp_res")),
-            (parse_button_spec("cc:9:18"), (None, "volume")),  # canal via MIDI
+            (parse_button_spec("cc:9:16"), (2, "lp_cutoff"), 0),
+            (parse_button_spec("cc:9:17"), (2, "lp_res"), 4),
+            (parse_button_spec("cc:9:18"), (None, "volume"), 7),  # canal via MIDI
         ]
 
     def test_pot_match(self):
         msg = mido.Message("control_change", channel=9, control=16, value=80)
-        self.assertEqual(match_pot(self.pots, msg), (2, "lp_cutoff"))
+        self.assertEqual(match_pot(self.pots, msg), (2, "lp_cutoff", 0))
         msg = mido.Message("control_change", channel=9, control=17, value=80)
-        self.assertEqual(match_pot(self.pots, msg), (2, "lp_res"))
+        self.assertEqual(match_pot(self.pots, msg), (2, "lp_res", 4))
 
     def test_pot_channel_from_midi(self):
         msg = mido.Message("control_change", channel=9, control=18, value=80)
-        self.assertEqual(match_pot(self.pots, msg), (9 % 8, "volume"))
+        self.assertEqual(match_pot(self.pots, msg), (9 % 8, "volume", 7))
 
     def test_pot_no_match(self):
         msg = mido.Message("control_change", channel=9, control=19, value=80)

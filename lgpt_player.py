@@ -59,6 +59,7 @@ VIZ_AGC_DOWN = 0.02       # adaptación al bajar (lenta: mantiene dinámica)
 VIZ_AGC_KNEE = 2.3        # una banda en la referencia llega a ~90% de altura
 VIZ_TILT = 0.5            # realce de agudos: peso (f/fmin)**VIZ_TILT
 VIZ_MAX_BANDS = 48        # más bandas que bins útiles solo repetiría barras
+VIZ_ZONES = 8             # la pantalla se reparte en 8 zonas, una por knob
 VIZ_ATTACK = 0.6          # subida rápida de la barra (0-1, mayor = más rápida)
 VIZ_RELEASE = 0.16        # caída lenta de la barra
 VIZ_PEAK_FALL = 0.012     # caída del testigo de pico por frame
@@ -280,20 +281,21 @@ def parse_pot_target(target: str) -> tuple | None:
 
 
 def match_pot(pots: list, msg) -> tuple | None:
-    """Devuelve (canal, parámetro) del pot que coincide con el mensaje.
+    """Devuelve (canal, parámetro, nº de knob 0-7) del pot que coincide.
 
-    pots: lista de (spec, target) donde target es (canal|None, param);
-    canal None = se deriva del canal MIDI del mensaje (% 8)."""
+    pots: lista de (spec, target, idx) donde target es (canal|None, param);
+    canal None = se deriva del canal MIDI del mensaje (% 8). `idx` es el
+    knob físico (pot1 -> 0), necesario para pintarlo en el visor."""
     if msg.type != "control_change":
         return None
-    for spec, target in pots:
+    for spec, target, idx in pots:
         if spec is None:
             continue
         mtype, ch, num = spec
         if mtype == "control_change" and msg.channel == ch \
                 and msg.control == num:
             tch, tparam = target
-            return (msg.channel % 8 if tch is None else tch), tparam
+            return (msg.channel % 8 if tch is None else tch), tparam, idx
     return None
 
 
@@ -348,8 +350,11 @@ def open_midi_input(port_name: str | None, engine_ref: dict,
         if pots:
             hit = match_pot(pots, msg)
             if hit is not None:
-                tch, tparam = hit
+                tch, tparam, idx = hit
                 engine.push_event("param", tch, tparam, msg.value)
+                values = engine_ref.get("pot_values")
+                if values is not None:
+                    values[idx] = msg.value     # solo para el visor
         elif msg.type == "control_change":
             engine.push_event("cc", msg.channel % 8, msg.control, msg.value)
 
@@ -518,6 +523,8 @@ class Player:
         self._viz_win = np.hanning(VIZ_NFFT).astype(np.float32)
         self._viz_layout_cache: dict = {}    # nbands -> (edges, weights, colors)
         self._viz_agc = VIZ_AGC_REF          # referencia de auto-ganancia
+        self.pot_labels: list = [None] * 8   # (pista, efecto) por knob activo
+        self.engine_ref["pot_values"] = [0] * 8   # último valor MIDI por knob
         self.stream = sd.OutputStream(
             samplerate=args.samplerate,
             channels=2,
@@ -598,13 +605,22 @@ class Player:
         # targets por canción sobre el mapeo físico global de knobs
         song_pots = song_cfg.get("pots", {})
         self.args.pots.clear()
+        self.pot_labels = [None] * 8       # (nº pista, efecto) por knob activo
         for key, entry in self.args.hw_pots.items():
             if not isinstance(entry, dict):
                 continue
             spec = parse_button_spec(entry.get("cc", ""))
             target = parse_pot_target(song_pots.get(key, ""))
-            if spec is not None and target is not None:
-                self.args.pots.append((spec, target))
+            if spec is None or target is None:
+                continue
+            try:
+                idx = int(key[3:]) - 1     # "pot3" -> 2
+            except ValueError:
+                continue
+            if not 0 <= idx < 8:
+                continue
+            self.args.pots.append((spec, target, idx))
+            self.pot_labels[idx] = (target[0] + 1, target[1])
 
     # -- UI curses --------------------------------------------------------------
 
@@ -738,13 +754,18 @@ class Player:
         scr.addstr(0, 1, head[:w - 2], curses.color_pair(cpair) | curses.A_BOLD)
 
         rows = h - 1                         # filas para barras (fila 0 = cabecera)
-        if rows < 2 or w < 6:
+        if rows < 2 or w < VIZ_ZONES * 2:
             self._draw_notice(scr, curses, h - 1)
             scr.refresh()
             return
-        step = 3 if w >= 24 else 2           # barra de 2 + 1 de hueco (o 1+1)
+        # La pantalla se reparte en 8 zonas, una por knob: cada zona lleva su
+        # tramo del espectro y, si el knob está asignado en esta canción, el
+        # valor del knob encima.
+        zone_w = w // VIZ_ZONES
+        step = 3 if zone_w >= 6 else 2       # barra de 2 + 1 de hueco (o 1+1)
         bar_w = step - 1
-        nbands = min(VIZ_MAX_BANDS, (w - 1) // step)
+        per_zone = max(1, min((zone_w - 1) // step, VIZ_MAX_BANDS // VIZ_ZONES))
+        nbands = per_zone * VIZ_ZONES
         _, _, colors = self._viz_layout(nbands)
 
         target = self._viz_levels(nbands)
@@ -758,28 +779,59 @@ class Player:
         peaks = np.maximum(peaks - VIZ_PEAK_FALL, bands)
         self._viz_bands, self._viz_peaks = bands, peaks
 
-        x0 = max(1, (w - nbands * step) // 2)
+        values = self.engine_ref.get("pot_values") or [0] * 8
         levels = 8                           # sub-bloques por celda (VIZ_BLOCKS)
-        for i in range(nbands):
-            x = x0 + i * step
-            attr = colors[i]
-            total = int(bands[i] * rows * levels)
-            full, part = divmod(total, levels)
-            for r in range(min(full, rows)):
-                y = h - 1 - r
-                a = attr | (curses.A_BOLD if r >= rows * 0.6 else 0)
-                scr.addstr(y, x, "█" * bar_w, a)
-            if full < rows and part > 0:
-                y = h - 1 - full
-                scr.addstr(y, x, VIZ_BLOCKS[part] * bar_w, attr)
-            # testigo de pico
-            pr = int(peaks[i] * rows)
-            if 0 < pr <= rows:
-                y = h - 1 - min(pr, rows - 1)
-                scr.addstr(y, x, "▁" * bar_w, self._viz_cap)
+        margin = max(0, (w - VIZ_ZONES * zone_w) // 2)
+        for z in range(VIZ_ZONES):
+            zx = margin + z * zone_w
+            for j in range(per_zone):
+                i = z * per_zone + j
+                x = zx + j * step
+                attr = colors[i]
+                total = int(bands[i] * rows * levels)
+                full, part = divmod(total, levels)
+                for r in range(min(full, rows)):
+                    a = attr | (curses.A_BOLD if r >= rows * 0.6 else 0)
+                    scr.addstr(h - 1 - r, x, "█" * bar_w, a)
+                if full < rows and part > 0:
+                    scr.addstr(h - 1 - full, x, VIZ_BLOCKS[part] * bar_w, attr)
+                pr = int(peaks[i] * rows)
+                if 0 < pr <= rows:
+                    scr.addstr(h - 1 - min(pr, rows - 1), x, "▁" * bar_w,
+                               self._viz_cap)
+            self._draw_knob(scr, curses, z, zx, zone_w, rows, h,
+                            values[z] if z < len(values) else 0)
 
         self._draw_notice(scr, curses, h - 1)
         scr.refresh()
+
+    def _draw_knob(self, scr, curses, z: int, zx: int, zone_w: int,
+                   rows: int, h: int, value: int):
+        """Knob `z` sobre su zona: etiqueta (pista+efecto) y una banda gruesa
+        a la altura del valor, estilo fader. Si el knob no está asignado en
+        esta canción no se dibuja nada (la zona queda solo con el espectro)."""
+        label = self.pot_labels[z] if z < len(self.pot_labels) else None
+        if label is None:
+            return
+        track, effect = label
+        wide = max(1, zone_w - 1)
+        val = min(max(value, 0), 127) / 127.0
+        # etiqueta: "3 SUB" (knob, efecto abreviado); se enciende con el valor
+        attr = self._viz_knob if val > 0.01 else self._viz_knob_off
+        tag = f"{z + 1}{effect[:3].upper()}"
+        scr.addstr(1, zx, tag[:wide], attr)
+        head_rows = 2                        # fila 1 etiqueta, fila 2 valor
+        if wide >= 6:
+            scr.addstr(2, zx, f"{track}:{int(val * 100):3d}"[:wide],
+                       self._viz_knob_off)
+        else:
+            head_rows = 1
+        # fader: banda gruesa a la altura del valor (abajo = 0). Se mueve
+        # solo por debajo de la etiqueta para no taparla al llegar al tope.
+        top = 1 + head_rows
+        span = max(1, (h - 1) - top)
+        y = h - 1 - int(val * span)
+        scr.addstr(y, zx, "▀" * wide, attr)
 
     def _draw_song(self, scr, curses, engine: Engine):
         scr.erase()
@@ -874,6 +926,10 @@ class Player:
         curses.init_pair(16, curses.COLOR_WHITE, bg)   # testigo de pico
         self._viz_gradient = [curses.color_pair(10 + i) for i in range(6)]
         self._viz_cap = curses.color_pair(16) | curses.A_BOLD
+        # knobs: blanco intenso al estar activos, atenuado en reposo, para
+        # que se lean por encima de las barras de color
+        self._viz_knob = curses.color_pair(16) | curses.A_BOLD
+        self._viz_knob_off = curses.color_pair(16) | curses.A_DIM
         scr.timeout(100)
         engine = None
         needs_clear = True                # limpieza completa al cambiar de vista
