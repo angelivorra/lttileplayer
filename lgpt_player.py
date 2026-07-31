@@ -49,7 +49,14 @@ CONFIG_PATH = Path(__file__).resolve().parent / "lttileplayer.toml"
 VIZ_NFFT = 2048           # ~46 ms @44.1k: resuelve graves sin retardo visible
 VIZ_FMIN = 35.0
 VIZ_FMAX = 16000.0
-VIZ_GAIN = 35.0           # compresión 1-exp(-x*G): picos ~tope, medias ~0.3-0.6
+# Auto-ganancia: con ganancia fija, un tema con graves fuertes deja las
+# barras bajas clavadas arriba (el drone de bulebule) y el visor deja de
+# informar. Se normaliza contra una referencia que sube rápido y baja
+# despacio, así el visor sigue siendo expresivo con cualquier nivel.
+VIZ_AGC_REF = 0.02        # nivel de referencia inicial/mínimo (evita ruido)
+VIZ_AGC_UP = 0.30         # adaptación al subir (rápida: no satura)
+VIZ_AGC_DOWN = 0.02       # adaptación al bajar (lenta: mantiene dinámica)
+VIZ_AGC_KNEE = 2.3        # una banda en la referencia llega a ~90% de altura
 VIZ_TILT = 0.5            # realce de agudos: peso (f/fmin)**VIZ_TILT
 VIZ_MAX_BANDS = 48        # más bandas que bins útiles solo repetiría barras
 VIZ_ATTACK = 0.6          # subida rápida de la barra (0-1, mayor = más rápida)
@@ -510,6 +517,7 @@ class Player:
         self._viz_peaks = None               # testigos de pico por barra
         self._viz_win = np.hanning(VIZ_NFFT).astype(np.float32)
         self._viz_layout_cache: dict = {}    # nbands -> (edges, weights, colors)
+        self._viz_agc = VIZ_AGC_REF          # referencia de auto-ganancia
         self.stream = sd.OutputStream(
             samplerate=args.samplerate,
             channels=2,
@@ -700,12 +708,19 @@ class Player:
 
     def _viz_levels(self, nbands: int) -> np.ndarray:
         """Nivel 0-1 por banda del último audio (rFFT de la ventana rodante),
-        con realce de agudos y compresión suave para que ninguna banda domine."""
+        con realce de agudos, auto-ganancia y compresión suave para que
+        ninguna banda domine ni se quede clavada arriba."""
         edges, weights, _ = self._viz_layout(nbands)
         spec = np.abs(np.fft.rfft(self._viz_ring * self._viz_win)) / VIZ_NFFT
         raw = np.array([spec[lo:hi].mean() for lo, hi in edges],
-                       dtype=np.float32)
-        return 1.0 - np.exp(-raw * weights * VIZ_GAIN)
+                       dtype=np.float32) * weights
+        # referencia adaptativa: sube rápido, baja despacio
+        peak = float(raw.max())
+        ref = self._viz_agc
+        rate = VIZ_AGC_UP if peak > ref else VIZ_AGC_DOWN
+        ref += rate * (peak - ref)
+        self._viz_agc = max(ref, VIZ_AGC_REF)
+        return 1.0 - np.exp(-raw / self._viz_agc * VIZ_AGC_KNEE)
 
     def _draw_viz(self, scr, curses, engine: Engine):
         """Barras de espectro a pantalla completa, reactivas al audio."""

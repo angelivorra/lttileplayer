@@ -481,9 +481,15 @@ class Voice:
         """Filtro LP del upstream (Filters.cpp + bucle inline de
         SampleInstrument.cpp), replicado en float.
 
-        Diferencia: el original usa punto fijo int32 que desborda y envuelve
-        en modo 'scream'; aquí se satura height a [-2,2] para evitar la
-        explosión numérica. Aproximación pendiente de validación a oído.
+        Diferencia con el original: en punto fijo int32 la no linealidad de
+        'scream' sale del desbordamiento (y el upstream además lee fuera de
+        rango en el clamp positivo, SampleInstrument.cpp:921 usa fltSpeed[i]
+        con i = índice de muestra), así que no es emulable bit a bit. Aquí
+        se acota el estado del filtro a fondo de escala: con resonancia alta
+        el término `dirt` (hasta 5000) dispara el lazo y sin tope la salida
+        se iba a ~40x fondo de escala (accordion de bulebule: res 80 +
+        scream), tapando la mezcla. Con el tope a 1.0 el nivel global cuadra
+        con el bounce de LGPT (RMS 0.17 frente a 0.19 de referencia).
         """
         cut = self.f_cut_base * self.cc_cutoff
         cut = min(max(cut, 0.0), 1.0)
@@ -510,11 +516,15 @@ class Voice:
                         sp = -2.0 / 3.0
                     sp *= dirt
                 sp = sp * reso + (lpin - hg) * freq
+                if sp > 1.0:
+                    sp = 1.0
+                elif sp < -1.0:
+                    sp = -1.0
                 hg = hg + sp + dl - hpin
-                if hg > 2.0:
-                    hg = 2.0
-                elif hg < -2.0:
-                    hg = -2.0
+                if hg > 1.0:
+                    hg = 1.0
+                elif hg < -1.0:
+                    hg = -1.0
                 dl = hpin
                 xs[i] = hg
             self.f_speed[c] = sp
