@@ -8,10 +8,18 @@ __pycache__/
 # Clon del repositorio upstream de LittleGPTracker
 LittleGPTracker/
 
-# Ficheros temporales de audio / salidas
+# Ficheros temporales de audio / salidas (grabaciones sueltas).
+# Los samples de las canciones y el banco de pads SÍ se versionan; los
+# mixdown.wav (bounces pesados que el player no usa) NO.
 *.wav
 *.mp3
 *.ogg
+# Sí: samples de las canciones (samples/) y banco de pads (wavs/).
+!songs/**/*.wav
+!wavs/*.wav
+# No: bounces de la canción entera en la raíz (mixdown.wav, nombre.wav);
+# son renders pesados que el player no reproduce.
+songs/*/*.wav
 
 # Ficheros del sistema / editores
 .DS_Store
