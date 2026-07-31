@@ -1368,7 +1368,7 @@
         </INSTRUMENT>
         <INSTRUMENT ID="40" TYPE="Sample">
             <PARAM NAME="sample" VALUE="accordion.wav" />
-            <PARAM NAME="volume" VALUE="48" />
+            <PARAM NAME="volume" VALUE="88" />
             <PARAM NAME="interpol" VALUE="linear" />
             <PARAM NAME="crush" VALUE="16" />
             <PARAM NAME="crushdrive" VALUE="255" />
@@ -1377,10 +1377,10 @@
             <PARAM NAME="fine tune" VALUE="127" />
             <PARAM NAME="pan" VALUE="127" />
             <PARAM NAME="filter cut" VALUE="111" />
-            <PARAM NAME="filter res" VALUE="80" />
+            <PARAM NAME="filter res" VALUE="0" />
             <PARAM NAME="filter type" VALUE="255" />
             <PARAM NAME="filter mode" VALUE="scream" />
-            <PARAM NAME="attenuate" VALUE="180" />
+            <PARAM NAME="attenuate" VALUE="255" />
             <PARAM NAME="start" VALUE="0" />
             <PARAM NAME="loopmode" VALUE="loop" />
             <PARAM NAME="slices" VALUE="1" />
