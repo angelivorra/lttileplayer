@@ -12,7 +12,7 @@ blocksize = 512
 delay = 1.0
 record = ""
 wavs_dir = "wavs"
-pad_volume = 90
+pad_volume = 45
 stream = 5050
 
 [midi]
