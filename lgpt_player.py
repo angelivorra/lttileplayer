@@ -802,8 +802,31 @@ class Player:
         y += rows_sel + 1
         big_text_half(scr, y, max(0, (w - len(nxt) * 4) // 2), nxt,
                       self._pair_dim)
+        self._draw_clients(scr, curses, w)
         self._draw_notice(scr, curses, h - 1)
         scr.refresh()
+
+    def _draw_clients(self, scr, curses, w: int):
+        """Iniciales de los clientes del robot en la esquina superior
+        derecha: brillante = conectado, atenuada = ausente. Los conectados
+        que no estén en la tabla de nombres salen como '?'."""
+        if self.event_server is None:
+            return
+        conectadas = set(self.event_server.connected_ips())
+        nombres = self.args.events.get("clients", {})
+        marcas = [(nombres[ip][:1].upper(), ip in conectadas)
+                  for ip in nombres]
+        # los que conectan sin estar dados de alta: uno por cada IP
+        marcas += [("?", True) for ip in conectadas if ip not in nombres]
+        if not marcas:
+            return
+        x = max(0, w - len(marcas) * 2 - 1)
+        for i, (letra, viva) in enumerate(marcas):
+            attr = self._pair_bright if viva else self._pair_dim
+            try:
+                scr.addstr(0, x + i * 2, letra, attr)
+            except curses.error:
+                pass                      # pantalla estrecha: se recorta
 
     # -- visualizador en directo (espectro reactivo) ----------------------------
 

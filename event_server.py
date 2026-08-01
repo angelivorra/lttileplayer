@@ -59,6 +59,7 @@ class EventServer:
         self._queued = 0
         self.dropped = 0
         self._clients: list[socket.socket] = []
+        self._peers: dict[socket.socket, str] = {}   # socket -> IP, para la UI
         self._lock = threading.Lock()      # protege la lista de clientes
         self._running = True
 
@@ -97,6 +98,11 @@ class EventServer:
         with self._lock:
             return len(self._clients)
 
+    def connected_ips(self) -> list[str]:
+        """IPs conectadas ahora mismo (para pintarlas en la lista)."""
+        with self._lock:
+            return [self._peers[c] for c in self._clients if c in self._peers]
+
     def close(self):
         self._running = False
         self._queue.put(None)
@@ -111,6 +117,7 @@ class EventServer:
                 except OSError:
                     pass
             self._clients.clear()
+            self._peers.clear()
 
     # -- hilos internos ------------------------------------------------------
 
@@ -141,6 +148,7 @@ class EventServer:
                 continue
             with self._lock:
                 self._clients.append(client)
+                self._peers[client] = addr[0]
             self._notify(f"cliente conectado: {addr[0]}")
 
     def _broadcast(self, data: bytes):
@@ -157,6 +165,7 @@ class EventServer:
                 for d in dead:
                     if d in self._clients:
                         self._clients.remove(d)
+                    self._peers.pop(d, None)
             for d in dead:
                 try:
                     d.close()

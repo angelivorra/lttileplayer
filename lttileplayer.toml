@@ -69,3 +69,13 @@ delay = 1000       # ms que el cliente espera antes de ejecutar (su base_delay)
 debug = 0
 ruido = 0
 pantalla = 1
+
+[events.clients]
+# IP -> nombre del cliente. En la lista de canciones se muestra la INICIAL de
+# cada uno en una esquina: brillante si está conectado, atenuada si no. Un
+# cliente conectado que no esté en esta tabla sale como "?".
+# Las IPs salen del inventario de ansible del repo lgptclient.
+"192.168.0.3" = "Obdulia"     # maleta
+"192.168.0.4" = "Carmen"      # sombrilla
+"192.168.0.10" = "Vocoder"    # vocoder
+"192.168.0.20" = "Guitarra"   # roboguitarra
