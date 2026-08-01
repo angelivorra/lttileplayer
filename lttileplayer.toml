@@ -58,3 +58,14 @@ eq_hi = 2.0        # agudos (dB)
 gain = 3.0         # ganancia de entrada al limitador (dB)
 limit = -1.0       # techo de salida (dB, 0 = fondo de escala)
 release = 0.15     # recuperación del limitador (s)
+
+[events]
+# Servidor TCP de eventos para los clientes del robot (solenoides, pantallas).
+# Mismo protocolo que el bridge server-midi.py del repo lgptclient, así que
+# los clientes ya desplegados no necesitan cambios.
+enabled = true
+port = 8888
+delay = 1000       # ms que el cliente espera antes de ejecutar (su base_delay)
+debug = 0
+ruido = 0
+pantalla = 1

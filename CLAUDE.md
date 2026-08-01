@@ -90,6 +90,49 @@ dict por pad), `pots` (targets, ver arriba). Ausente = sin mute y sin
 efectos. Ojo: el `[channels] mute` del toml NO se aplica en runtime; el mute
 efectivo es el de `robotraca.json`.
 
+## Eventos a los clientes del robot (`event_server.py`)
+
+Los solenoides, pantallas y el vocoder viven en Raspberry Pis aparte
+(repo `lgptclient`, desplegadas por ansible: maleta .3, sombrilla .4,
+roboguitarra .20, vocoder .10) y escuchan por **TCP 8888**. Antes el player
+sacaba MIDI por ALSA y el bridge `server-midi.py` lo sellaba y repartía;
+ahora **el player los emite directamente** y el MIDI queda **solo como
+entrada** (el controlador de knobs y pads).
+
+Protocolo (idéntico al del bridge, para no tocar los clientes): líneas
+ASCII terminadas en `\n`, `TCP_NODELAY`.
+
+    CONFIG,<delay_ms>,<debug>,<ruido>,<pantalla>   al conectar
+    SYNC,<ts_ms>                                   al conectar + cada 5 s
+    NOTA,<ts_ms>,<nota>,<canal>,<velocidad>
+    CC,<ts_ms>,<valor>,<canal>,<control>
+    START / STOP / END,<ts_ms>
+
+**La cuenta de tiempos es lo delicado.** El cliente no ejecuta al recibir:
+programa la acción en `ts + delay_ms` (1 s), y sincroniza su reloj con los
+`SYNC` del propio socket (sin NTP, no hay internet). El secuenciador va un
+`audio_delay` por delante de lo que suena, así que:
+
+- `Engine.event_time_ms()` devuelve el instante en que se **oirá** el evento
+  (reloj del bloque vía `dac_time` + muestra dentro del bloque + `audio_delay`);
+- `EventMidiOut` manda `instante_audible - delay_del_cliente`.
+
+Así el solenoide dispara justo cuando suena la nota, con cualquier
+combinación de retardos. Ganamos precisión frente al bridge, que sellaba con
+`now()` al recibir por ALSA (y arrastraba el jitter de esa cola).
+
+Se usa TCP y no UDP a propósito: ese margen de 1 s absorbe de sobra una
+retransmisión en LAN, así que la fiabilidad sale gratis; el multicast WiFi,
+en cambio, va sin ACK y a la tasa básica más baja.
+
+Como el resto de sinks pesados, `emit()` solo encola: el envío va en su
+propio hilo y **el hilo de audio nunca se bloquea** (medido: 1.4 ms en el
+peor caso con un cliente colgado, frente a 11.6 ms de presupuesto).
+
+Configuración en `[events]` del toml. Si el puerto está ocupado (el
+`servidor.service` viejo en la Pi) el player avisa y sigue sonando sin
+eventos, en vez de caerse.
+
 ## Convenciones del repo
 
 - Comentarios y docstrings en **español**, solo cuando explican el *por qué*

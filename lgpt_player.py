@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 import sounddevice as sd
 
+from event_server import EventMidiOut, EventServer
 from lgpt_engine import Engine, MasterChain, MidiOut, SAMPLE_RATE
 
 DEFAULT_SONGS_DIR = "/home/angel/Documentos/canciones/"
@@ -563,7 +564,10 @@ class Player:
         self.index = 0
         self.engine_ref: dict = {}
         self.midi_in = None
-        self.midi_out: MidoMidiOut | None = None
+        # El MIDI se usa solo de ENTRADA (el controlador). Los eventos para
+        # los clientes del robot salen por TCP, no por un puerto MIDI.
+        self.event_server: EventServer | None = None
+        self.event_out: EventMidiOut | None = None
         self.recorder: WavRecorder | None = None
         self._notice: tuple | None = None   # (mensaje, timestamp) para la UI
         self.streamer: TcpStreamer | None = None
@@ -604,6 +608,12 @@ class Player:
         if engine is None:
             outdata[:] = 0
         else:
+            # Reloj de pared de la primera muestra del bloque, para que el
+            # engine pueda sellar los eventos con el instante en que sonarán.
+            # dac_time va en el reloj del stream, no en el del sistema: se
+            # pasa a reloj de pared con la diferencia contra currentTime.
+            engine.block_time_ms = (
+                time.time() + (dac_time - time_info.currentTime)) * 1000.0
             outdata[:] = engine.render(frames)
         recorder = self.recorder
         if recorder is not None:
@@ -629,7 +639,7 @@ class Player:
         engine = Engine(project_dir, sample_rate=self.args.samplerate,
                         audio_delay=self.args.delay,
                         wavs_dir=self.args.wavs_dir)
-        engine.midi_out = self.midi_out
+        engine.midi_out = self.event_out
         m = self.args.master_fx
         if m:
             engine.master_chain = MasterChain(
@@ -1411,7 +1421,24 @@ class Player:
             time.sleep(1.0)
 
     def run(self):
-        self.midi_out = open_midi_output(self.args.midi_out)
+        ev = self.args.events
+        if ev.get("enabled", True):
+            port = int(ev.get("port", 8888))
+            try:
+                self.event_server = EventServer(
+                    port=port, config=ev, on_event=self._set_notice)
+            except OSError as exc:
+                # Caso típico en la Pi: el bridge viejo (servidor.service) ya
+                # tiene el 8888. Mejor sonar sin eventos que no sonar.
+                print(f"[eventos] no se puede abrir el puerto {port}: {exc}")
+                print("[eventos] ¿está corriendo el servidor.service antiguo? "
+                      "El player seguirá sin enviar eventos.")
+            else:
+                self.event_out = EventMidiOut(
+                    self.event_server, self.engine_ref,
+                    client_delay_ms=int(ev.get("delay", 1000)))
+                print(f"[eventos] servidor TCP en el puerto "
+                      f"{self.event_server.port}")
         self.engine_ref["raw_queue"] = queue.SimpleQueue()
         self.midi_in = open_midi_input(
             self.args.midi, self.engine_ref, self.ui_queue, self.buttons,
@@ -1440,10 +1467,11 @@ class Player:
                 self.recorder.close()
             if self.streamer is not None:
                 self.streamer.close()
+            if self.event_server is not None:
+                self.event_server.close()
             if self.midi_in is not None:
                 self.midi_in.close()
-            if self.midi_out is not None:
-                self.midi_out._port.close()
+
 
 
 def main():
@@ -1511,6 +1539,7 @@ def main():
         wd = str(wp)
     args.wavs_dir = wd
     args.master_fx = cfg.get("master", {})   # EQ + limitador de la mezcla
+    args.events = cfg.get("events", {})      # servidor TCP para los clientes
     args.pad_volume = audio_cfg.get("pad_volume", 60)
 
     Player(args).run()

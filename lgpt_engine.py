@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import math
 import queue
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -202,6 +203,14 @@ class MidiOut:
         pass
 
     def program_change(self, channel: int, program: int):
+        pass
+
+    # Transporte. El engine los llama con getattr defensivo, así que un sink
+    # que no los implemente (los de test) sigue valiendo.
+    def transport_start(self):
+        pass
+
+    def transport_stop(self, finished: bool):
         pass
 
 
@@ -1197,6 +1206,12 @@ class Engine:
         self.transpose = int(project.project.get("transpose", "0"))
         self.samples_per_tick = self._tick_samples()
         self.master_chain: Optional["MasterChain"] = None
+        # Reloj de pared (ms) de la PRIMERA muestra del bloque que se está
+        # renderizando; lo pone el player desde el callback de audio a partir
+        # de dac_time. Con esto un evento se puede sellar con el instante
+        # exacto en que sonará, en vez de con "cuando lo recibió el bridge".
+        self.block_time_ms: Optional[float] = None
+        self._tick_offset = 0        # muestra del bloque en la que cae el tick
         self.bank = SampleBank(project.dir)
         self.instruments = {
             iid: parse_instrument(iid, ins["params"])
@@ -1256,6 +1271,7 @@ class Engine:
 
     def set_audio_delay(self, seconds: float):
         """Configura el retardo de la salida de audio (0 = sin delay)."""
+        self.audio_delay = seconds
         n = int(seconds * self.sr)
         self._rings = [
             np.zeros((n, 2), dtype=np.float32) if n > 0 else None
@@ -1292,6 +1308,28 @@ class Engine:
         self.finished = False
         self.playing = True
         self.unsupported_cmds.clear()
+        self._transport("transport_start")
+
+    def event_time_ms(self) -> int:
+        """Instante de reloj (ms) en que se OIRÁ el evento que se está
+        procesando.
+
+        El secuenciador va un `audio_delay` por delante de lo que suena: la
+        nota se genera ahora pero su audio sale de la línea de retardo un
+        segundo después. Lo que necesitan los clientes es el momento audible,
+        así que se suma. Si el player no ha puesto `block_time_ms` (tests,
+        render offline) se cae al reloj actual."""
+        if self.block_time_ms is None:
+            return int(time.time() * 1000 + self.audio_delay * 1000)
+        return int(self.block_time_ms
+                   + self._tick_offset * 1000.0 / self.sr
+                   + self.audio_delay * 1000.0)
+
+    def _transport(self, name: str, *args):
+        """Avisa al sink de un cambio de transporte, si lo soporta."""
+        hook = getattr(self.midi_out, name, None)
+        if hook is not None:
+            hook(*args)
 
     def panic(self):
         """Note off de todas las notas MIDI activas (al cambiar de canción
@@ -1371,6 +1409,7 @@ class Engine:
                     self.tick_phase -= n
                 if self.tick_phase < 1.0:
                     frac = self.tick_phase    # resto fraccionario ya consumido
+                    self._tick_offset = off
                     self._process_tick()
                     self.tick_phase = self.samples_per_tick + frac
         # 2. t+1: salida del delay, efectos del controlador y mezcla
@@ -1483,6 +1522,7 @@ class Engine:
                 for ch in self.channels:
                     ch.voice = None
                     self._midi_stop_note(ch)
+                self._transport("transport_stop", False)
 
     def _apply_cc(self, ci: int, cc: int, val: int):
         """Mapeo MIDI CC por canal: 1=cutoff, 7=volumen, 10=pan, 20=pitch."""
@@ -1780,6 +1820,7 @@ class Engine:
         elif cmd == "STOP":
             self.playing = False
             self.finished = True
+            self._transport("transport_stop", True)   # fin natural -> END
         elif cmd in ("HOP ", "DLAY"):
             pass                    # se procesan en el avance de step/trigger
         elif cmd == "GROV":

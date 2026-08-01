@@ -10,7 +10,7 @@
 #   3. Crea el venv en la Pi e instala dependencias (pip)
 #   4. Instala lttileplayer.service (systemd) y lo arranca
 #   5. Desactiva el antiguo lgpt.service y limpia rc.local
-#   6. Verifica: servicio activo, puerto MIDI conectado a movida:in,
+#   6. Verifica: servicio activo, puerto TCP de eventos escuchando,
 #      y render de prueba del engine en la Pi
 #
 # lttileplayer.toml se edita en el repo (o con lgpt_setup.py / la
@@ -55,23 +55,11 @@ ssh "$PI" "
 "
 
 echo "==> 4/6 Arranque en pantalla (autologin tty1)"
-ssh "$PI" "cat > '$APP/midi-connect.sh' && chmod +x '$APP/midi-connect.sh'" <<'EOF'
-#!/bin/sh
-# Conecta la salida MIDI de lttileplayer al bridge TCP-MIDI (movida:in)
-# si existe; si no, no hace nada.
-for i in $(seq 1 40); do
-    SRC=$(aconnect -l | awk '/^client [0-9]+/{c=$2; gsub(":","",c)} /lttileplayer/{print c; exit}')
-    [ -n "$SRC" ] && break
-    sleep 0.5
-done
-if [ -n "$SRC" ]; then
-    aconnect -l | grep -q "movida" && aconnect "$SRC:0" "movida:in" 2>/dev/null
-fi
-exit 0
-EOF
+# Ya no se cablea MIDI: el player no tiene salida MIDI (el MIDI es solo de
+# entrada, para el controlador) y manda los eventos a los clientes por TCP.
+ssh "$PI" "rm -f '$APP/midi-connect.sh'"
 ssh "$PI" "cat > '$APP/run-on-tty1.sh' && chmod +x '$APP/run-on-tty1.sh'" <<EOF
 #!/bin/sh
-$APP/midi-connect.sh &
 exec $APP/.venv/bin/python $APP/lgpt_player.py
 EOF
 # autologin de angel en tty1 + hook en el profile (solo tty1, no SSH)
