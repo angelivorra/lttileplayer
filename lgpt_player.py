@@ -18,7 +18,7 @@ Uso:
                    [--blocksize N]
 
 Teclas:
-    lista:  up/down o j/k moverse, enter reproducir, q salir
+    lista:  up/down o j/k moverse, enter reproducir, r reiniciar, q salir
     play:   espacio play/pausa, n siguiente, p anterior, q volver a la lista
 """
 
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import queue
 import random
 import sys
@@ -583,6 +584,7 @@ class Player:
         self._notice: tuple | None = None   # (mensaje, timestamp) para la UI
         self.streamer: TcpStreamer | None = None
         self._expected_dac_time: float | None = None  # reloj real esperado
+        self._restart = False               # STOP en el menú: relanzar
         # visualizador en directo (ver constantes VIZ_*)
         self._view_mode = "viz"              # "viz" | "detail"
         self._want_viz = False               # el callback copia audio solo si True
@@ -756,7 +758,7 @@ class Player:
             return None
         if context == "list":
             return {"up": "up", "down": "down",
-                    "play": "\n", "stop": "c"}.get(action)
+                    "play": "\n", "stop": "restart"}.get(action)
         return {"up": "p", "down": "n",
                 "play": " ", "stop": "q"}.get(action)
 
@@ -1182,6 +1184,12 @@ class Player:
                 continue
             if key in ("q", "esc"):
                 return
+            if key in ("restart", "r"):
+                # Salir del bucle: run() limpia y vuelve a ejecutar el
+                # programa. Sirve para recoger cambios de configuración o
+                # para salir de un estado colgado sin tocar el teclado.
+                self._restart = True
+                return
             if key == "c":
                 self._config_view(scr, curses)
                 self.projects = find_projects(Path(self.args.songs)) or \
@@ -1588,6 +1596,15 @@ class Player:
                 self.event_server.close()
             if self.midi_in is not None:
                 self.midi_in.close()
+        if self._restart:
+            # Se relanza AQUÍ, ya fuera del finally: el audio, los sockets y
+            # el MIDI están cerrados y curses ha devuelto la terminal, así
+            # que el proceso nuevo encuentra libres el dispositivo y el
+            # puerto 8888. execv reemplaza el proceso, no deja huérfanos.
+            print("[player] reiniciando...")
+            sys.stdout.flush()
+            time.sleep(0.3)          # deja al SO soltar el audio y el socket
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 
