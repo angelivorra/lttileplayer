@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import math
 import queue
+import random
 import sys
 import threading
 import time
@@ -60,7 +61,11 @@ VIZ_AGC_DOWN = 0.02       # adaptación al bajar (lenta: mantiene dinámica)
 VIZ_AGC_KNEE = 2.3        # una banda en la referencia llega a ~90% de altura
 VIZ_TILT = 0.5            # realce de agudos: peso (f/fmin)**VIZ_TILT
 VIZ_MAX_BANDS = 48        # más bandas que bins útiles solo repetiría barras
-VIZ_ZONES = 8             # la pantalla se reparte en 8 zonas, una por knob
+VIZ_ZONES = 8             # 8 knobs = 8 celdas
+VIZ_GRID_ROWS = 2         # rejilla 2x4: knobs 1-4 arriba, 5-8 abajo
+VIZ_GRID_COLS = 4
+# Caracteres con los que se rompe la celda al abrir el knob.
+VIZ_GLITCH = "▓▒░▚▞▙▟"
 VIZ_ATTACK = 0.6          # subida rápida de la barra (0-1, mayor = más rápida)
 VIZ_RELEASE = 0.16        # caída lenta de la barra
 VIZ_PEAK_FALL = 0.012     # caída del testigo de pico por frame
@@ -581,6 +586,8 @@ class Player:
         self._viz_win = np.hanning(VIZ_NFFT).astype(np.float32)
         self._viz_layout_cache: dict = {}    # nbands -> (edges, weights, colors)
         self._viz_agc = VIZ_AGC_REF          # referencia de auto-ganancia
+        self._viz_frame = 0                  # avanza la fase de la distorsion
+        self._viz_rng = random.Random(0)     # glitch reproducible
         self.pot_labels: list = [None] * 8   # (pista, efecto) por knob activo
         self.engine_ref["pot_values"] = [0] * 8   # último valor MIDI por knob
         self.stream = sd.OutputStream(
@@ -640,6 +647,11 @@ class Player:
                         audio_delay=self.args.delay,
                         wavs_dir=self.args.wavs_dir)
         engine.midi_out = self.event_out
+        # Los knobs arrancan a cero en cada canción: el controlador no
+        # responde a consultas (solo emite CC al moverlo), así que no hay
+        # forma de leer su posición física. El motor ya nace sin efectos, y
+        # esto deja la pantalla acorde hasta que se toque un mando.
+        self.engine_ref["pot_values"] = [0] * 8
         m = self.args.master_fx
         if m:
             engine.master_chain = MasterChain(
@@ -879,10 +891,13 @@ class Player:
         return 1.0 - np.exp(-raw / self._viz_agc * VIZ_AGC_KNEE)
 
     def _draw_viz(self, scr, curses, engine: Engine):
-        """Barras de espectro a pantalla completa, reactivas al audio."""
+        """Rejilla de 2x4: una celda por knob (1-4 arriba, 5-8 abajo).
+
+        Cada celda lleva su tramo del espectro y, al abrir el knob, se
+        distorsiona: las filas se desplazan y los bloques se corrompen tanto
+        más cuanto más abierto está. Así el efecto se ve, no solo se lee."""
         scr.erase()
         h, w = scr.getmaxyx()
-        # cabecera mínima: estado + canción + BPM (el resto es visual)
         if engine.finished:
             sym, cpair = "[]", 6
         elif engine.playing:
@@ -893,19 +908,17 @@ class Player:
         head = f"{sym} {name}  {engine.tempo:.0f}BPM"
         scr.addstr(0, 1, head[:w - 2], curses.color_pair(cpair) | curses.A_BOLD)
 
-        rows = h - 1                         # filas para barras (fila 0 = cabecera)
-        if rows < 2 or w < VIZ_ZONES * 2:
+        area_h = h - 1                       # fila 0 = cabecera
+        cell_h = area_h // VIZ_GRID_ROWS
+        cell_w = w // VIZ_GRID_COLS
+        if cell_h < 3 or cell_w < 4:
             self._draw_notice(scr, curses, h - 1)
             scr.refresh()
             return
-        # La pantalla se reparte en 8 zonas, una por knob: cada zona lleva su
-        # tramo del espectro y, si el knob está asignado en esta canción, el
-        # valor del knob encima.
-        zone_w = w // VIZ_ZONES
-        step = 3 if zone_w >= 6 else 2       # barra de 2 + 1 de hueco (o 1+1)
-        bar_w = step - 1
-        per_zone = max(1, min((zone_w - 1) // step, VIZ_MAX_BANDS // VIZ_ZONES))
-        nbands = per_zone * VIZ_ZONES
+
+        per_cell = max(1, min((cell_w - 1) // 2,
+                              VIZ_MAX_BANDS // VIZ_ZONES))
+        nbands = per_cell * VIZ_ZONES
         _, _, colors = self._viz_layout(nbands)
 
         target = self._viz_levels(nbands)
@@ -913,65 +926,123 @@ class Player:
         if bands is None or len(bands) != nbands:
             bands = np.zeros(nbands, dtype=np.float32)
             peaks = np.zeros(nbands, dtype=np.float32)
-        # envolvente por barra: ataque rápido, caída lenta (look de directo)
         rising = target > bands
         bands += np.where(rising, VIZ_ATTACK, VIZ_RELEASE) * (target - bands)
         peaks = np.maximum(peaks - VIZ_PEAK_FALL, bands)
         self._viz_bands, self._viz_peaks = bands, peaks
 
         values = self.engine_ref.get("pot_values") or [0] * 8
-        levels = 8                           # sub-bloques por celda (VIZ_BLOCKS)
-        margin = max(0, (w - VIZ_ZONES * zone_w) // 2)
-        for z in range(VIZ_ZONES):
-            zx = margin + z * zone_w
-            for j in range(per_zone):
-                i = z * per_zone + j
-                x = zx + j * step
-                attr = colors[i]
-                total = int(bands[i] * rows * levels)
-                full, part = divmod(total, levels)
-                for r in range(min(full, rows)):
-                    a = attr | (curses.A_BOLD if r >= rows * 0.6 else 0)
-                    scr.addstr(h - 1 - r, x, "█" * bar_w, a)
-                if full < rows and part > 0:
-                    scr.addstr(h - 1 - full, x, VIZ_BLOCKS[part] * bar_w, attr)
-                pr = int(peaks[i] * rows)
-                if 0 < pr <= rows:
-                    scr.addstr(h - 1 - min(pr, rows - 1), x, "▁" * bar_w,
-                               self._viz_cap)
-            self._draw_knob(scr, curses, z, zx, zone_w, rows, h,
-                            values[z] if z < len(values) else 0)
+        self._viz_frame += 1
+        for k in range(VIZ_ZONES):
+            row, col = divmod(k, VIZ_GRID_COLS)
+            y0 = 1 + row * cell_h
+            x0 = col * cell_w
+            lo = k * per_cell
+            self._draw_knob_cell(
+                scr, curses, k, y0, x0, cell_h, cell_w,
+                bands[lo:lo + per_cell], peaks[lo:lo + per_cell],
+                colors[lo:lo + per_cell],
+                values[k] if k < len(values) else 0)
 
         self._draw_notice(scr, curses, h - 1)
         scr.refresh()
 
-    def _draw_knob(self, scr, curses, z: int, zx: int, zone_w: int,
-                   rows: int, h: int, value: int):
-        """Knob `z` sobre su zona: etiqueta (pista+efecto) y una banda gruesa
-        a la altura del valor, estilo fader. Si el knob no está asignado en
-        esta canción no se dibuja nada (la zona queda solo con el espectro)."""
-        label = self.pot_labels[z] if z < len(self.pot_labels) else None
-        if label is None:
+    def _draw_knob_cell(self, scr, curses, idx: int, y0: int, x0: int,
+                        cell_h: int, cell_w: int, bands, peaks, colors,
+                        value: int):
+        """Dibuja la celda de un knob: espectro + etiqueta + distorsión.
+
+        Se compone primero en una rejilla de caracteres y se vuelca al final,
+        porque la distorsión desplaza filas enteras y es más simple aplicarla
+        sobre el buffer que sobre la pantalla."""
+        amount = min(max(value, 0), 127) / 127.0
+        inner_w = max(1, cell_w - 1)         # deja un hueco entre columnas
+        bar_rows = cell_h - 1                # fila 0 de la celda = etiqueta
+        if bar_rows < 1:
             return
-        track, effect = label
-        wide = max(1, zone_w - 1)
-        val = min(max(value, 0), 127) / 127.0
-        # etiqueta: "3 SUB" (knob, efecto abreviado); se enciende con el valor
-        attr = self._viz_knob if val > 0.01 else self._viz_knob_off
-        tag = f"{z + 1}{effect[:3].upper()}"
-        scr.addstr(1, zx, tag[:wide], attr)
-        head_rows = 2                        # fila 1 etiqueta, fila 2 valor
-        if wide >= 6:
-            scr.addstr(2, zx, f"{track}:{int(val * 100):3d}"[:wide],
-                       self._viz_knob_off)
+        grid = [[" "] * inner_w for _ in range(bar_rows)]
+        attrs = [[0] * inner_w for _ in range(bar_rows)]
+
+        # espectro de la celda, creciendo desde abajo
+        bar_w = max(1, inner_w // max(1, len(bands)))
+        levels = len(VIZ_BLOCKS) - 1
+        for i, lvl in enumerate(bands):
+            x = i * bar_w
+            if x >= inner_w:
+                break
+            total = int(lvl * bar_rows * levels)
+            full, part = divmod(total, levels)
+            for r in range(min(full, bar_rows)):
+                for dx in range(min(bar_w, inner_w - x)):
+                    grid[bar_rows - 1 - r][x + dx] = "█"
+                    attrs[bar_rows - 1 - r][x + dx] = colors[i]
+            if full < bar_rows and part > 0:
+                for dx in range(min(bar_w, inner_w - x)):
+                    grid[bar_rows - 1 - full][x + dx] = VIZ_BLOCKS[part]
+                    attrs[bar_rows - 1 - full][x + dx] = colors[i]
+            pr = int(peaks[i] * bar_rows)
+            if 0 < pr <= bar_rows:
+                yy = bar_rows - min(pr, bar_rows)
+                for dx in range(min(bar_w, inner_w - x)):
+                    grid[yy][x + dx] = "▁"
+                    attrs[yy][x + dx] = self._viz_cap
+
+        if amount > 0.01:
+            self._distort(grid, attrs, amount, inner_w, bar_rows)
+
+        for r in range(bar_rows):
+            y = y0 + 1 + r
+            for c in range(inner_w):
+                ch = grid[r][c]
+                if ch == " ":
+                    continue
+                try:
+                    scr.addstr(y, x0 + c, ch, attrs[r][c])
+                except curses.error:
+                    pass
+
+        # etiqueta arriba de la celda: knob, efecto y % (si el knob se usa)
+        label = self.pot_labels[idx] if idx < len(self.pot_labels) else None
+        if label is None:
+            tag, attr = f"{idx + 1}", self._viz_knob_off
         else:
-            head_rows = 1
-        # fader: banda gruesa a la altura del valor (abajo = 0). Se mueve
-        # solo por debajo de la etiqueta para no taparla al llegar al tope.
-        top = 1 + head_rows
-        span = max(1, (h - 1) - top)
-        y = h - 1 - int(val * span)
-        scr.addstr(y, zx, "▀" * wide, attr)
+            pistas, effect = label
+            tag = f"{idx + 1}{effect[:3].upper()}"
+            if inner_w >= 9:
+                tag += f" {pistas} {int(amount * 100):3d}"
+            attr = self._viz_knob if amount > 0.01 else self._viz_knob_off
+        try:
+            scr.addstr(y0, x0, tag[:inner_w], attr)
+        except curses.error:
+            pass
+
+    def _distort(self, grid, attrs, amount: float, w: int, rows: int):
+        """Distorsiona la celda proporcionalmente a lo abierto que esté el
+        knob: desplaza filas en horizontal y corrompe bloques. A tope se ve
+        claramente roto; a un cuarto solo tiembla un poco."""
+        rng = self._viz_rng
+        # El desplazamiento crece LINEAL con el knob: si se multiplica dos
+        # veces por `amount` queda cuadrático y hasta un tercio de recorrido
+        # no se movía nada, que en directo se siente como que no responde.
+        max_shift = max(1.0, amount * w / 3.0)
+        phase = self._viz_frame * 0.35
+        for r in range(rows):
+            # desplazamiento: onda + ruido, para que se mueva y no vibre igual
+            wave = math.sin(phase + r * 0.9)
+            shift = int(round(wave * max_shift))
+            if rng.random() < amount * 0.3:       # tirón puntual
+                shift += rng.randint(-int(max_shift), int(max_shift))
+            shift %= w                  # evita indices fuera de rango
+            if shift:
+                # rotar: la misma expresion vale para los dos sentidos
+                grid[r] = grid[r][-shift:] + grid[r][:-shift]
+                attrs[r] = attrs[r][-shift:] + attrs[r][:-shift]
+            # corrupción de bloques: entra pronto y sube con el knob
+            if amount > 0.15:
+                prob = (amount - 0.15) * 0.45
+                for c in range(w):
+                    if grid[r][c] != " " and rng.random() < prob:
+                        grid[r][c] = VIZ_GLITCH[rng.randrange(len(VIZ_GLITCH))]
 
     def _draw_song(self, scr, curses, engine: Engine):
         scr.erase()
