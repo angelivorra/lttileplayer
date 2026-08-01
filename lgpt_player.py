@@ -66,6 +66,12 @@ VIZ_GRID_ROWS = 2         # rejilla 2x4: knobs 1-4 arriba, 5-8 abajo
 VIZ_GRID_COLS = 4
 # Caracteres con los que se rompe la celda al abrir el knob.
 VIZ_GLITCH = "▓▒░▚▞▙▟"
+# Ancho de barra + hueco. Subirlo = menos barras y mas gruesas.
+VIZ_BAR_STEP = 5
+# Caracteres y densidad del ruido de fondo con el que se llena la region
+# de un knob abierto, para que se vea que actua aunque no haya barras.
+VIZ_NOISE = "░▒·˙"
+VIZ_NOISE_MAX = 0.16
 VIZ_ATTACK = 0.6          # subida rápida de la barra (0-1, mayor = más rápida)
 VIZ_RELEASE = 0.16        # caída lenta de la barra
 VIZ_PEAK_FALL = 0.012     # caída del testigo de pico por frame
@@ -917,7 +923,7 @@ class Player:
             scr.refresh()
             return
 
-        step = 3 if w >= 24 else 2           # barra de 2 + 1 de hueco (o 1+1)
+        step = VIZ_BAR_STEP if w >= 24 else 2
         bar_w = step - 1
         nbands = min(VIZ_MAX_BANDS, (w - 1) // step)
         _, _, colors = self._viz_layout(nbands)
@@ -1036,6 +1042,7 @@ class Player:
         max_shift = max(1.0, amount * ancho / 3.0)
         phase = self._viz_frame * 0.35
         prob = (amount - 0.15) * 0.45 if amount > 0.15 else 0.0
+        ruido = amount * VIZ_NOISE_MAX
         for r in range(y0, y1):
             wave = math.sin(phase + r * 0.9)
             shift = int(round(wave * max_shift))
@@ -1049,10 +1056,15 @@ class Player:
                 fila_a = attrs[r]
                 tramo_a = fila_a[x0:x1]
                 fila_a[x0:x1] = tramo_a[-shift:] + tramo_a[:-shift]
-            if prob:
-                for c in range(x0, x1):
-                    if grid[r][c] != " " and rng.random() < prob:
+            for c in range(x0, x1):
+                if grid[r][c] != " ":
+                    if prob and rng.random() < prob:
                         grid[r][c] = VIZ_GLITCH[rng.randrange(len(VIZ_GLITCH))]
+                elif rng.random() < ruido:
+                    # hueco vacio: ruido tenue, para que la region se vea
+                    # aunque el espectro no llegue hasta ahi
+                    grid[r][c] = VIZ_NOISE[rng.randrange(len(VIZ_NOISE))]
+                    attrs[r][c] = self._viz_noise
 
     def _draw_song(self, scr, curses, engine: Engine):
         scr.erase()
@@ -1152,6 +1164,7 @@ class Player:
         # que se lean por encima de las barras de color
         self._viz_knob = curses.color_pair(16) | curses.A_BOLD
         self._viz_knob_off = curses.color_pair(16) | curses.A_DIM
+        self._viz_noise = curses.color_pair(16) | curses.A_DIM
         scr.timeout(100)
         engine = None
         needs_clear = True                # limpieza completa al cambiar de vista
